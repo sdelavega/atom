@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash
 
 if [ "$(uname)" == 'Darwin' ]; then
   OS='Mac'
@@ -9,6 +9,12 @@ elif [ "$(expr substr $(uname -s) 1 10)" == 'MINGW32_NT' ]; then
 else
   echo "Your platform ($(uname -a)) is not supported."
   exit 1
+fi
+
+if [ "$(basename $0)" == 'atom-beta' ]; then
+  BETA_VERSION=true
+else
+  BETA_VERSION=
 fi
 
 while getopts ":wtfvh-:" opt; do
@@ -44,8 +50,16 @@ if [ $REDIRECT_STDERR ]; then
   exec 2> /dev/null
 fi
 
+if [ $EXPECT_OUTPUT ]; then
+  export ELECTRON_ENABLE_LOGGING=1
+fi
+
 if [ $OS == 'Mac' ]; then
-  ATOM_APP_NAME=Atom.app
+  if [ -n "$BETA_VERSION" ]; then
+    ATOM_APP_NAME="Atom Beta.app"
+  else
+    ATOM_APP_NAME="Atom.app"
+  fi
 
   if [ -z "${ATOM_PATH}" ]; then
     # If ATOM_PATH isnt set, check /Applications and then ~/Applications for Atom.app
@@ -74,9 +88,14 @@ if [ $OS == 'Mac' ]; then
 elif [ $OS == 'Linux' ]; then
   SCRIPT=$(readlink -f "$0")
   USR_DIRECTORY=$(readlink -f $(dirname $SCRIPT)/..)
-  ATOM_PATH="$USR_DIRECTORY/share/atom/atom"
-  ATOM_HOME="${ATOM_HOME:-$HOME/.atom}"
 
+  if [ -n "$BETA_VERSION" ]; then
+    ATOM_PATH="$USR_DIRECTORY/share/atom-beta/atom"
+  else
+    ATOM_PATH="$USR_DIRECTORY/share/atom/atom"
+  fi
+
+  ATOM_HOME="${ATOM_HOME:-$HOME/.atom}"
   mkdir -p "$ATOM_HOME"
 
   : ${TMPDIR:=/tmp}

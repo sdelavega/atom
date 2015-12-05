@@ -4,21 +4,23 @@
 return unless process.env.ATOM_INTEGRATION_TESTS_ENABLED
 # Integration tests require a fast machine and, for now, we cannot afford to
 # run them on Travis.
-return if process.env.TRAVIS
+return if process.env.CI
 
-fs = require "fs"
+fs = require "fs-plus"
 path = require "path"
 temp = require("temp").track()
 runAtom = require "./helpers/start-atom"
+CSON = require "season"
 
 describe "Starting Atom", ->
-  [tempDirPath, otherTempDirPath, atomHome] = []
+  atomHome = temp.mkdirSync('atom-home')
+  [tempDirPath, otherTempDirPath] = []
 
   beforeEach ->
     jasmine.useRealClock()
-
-    atomHome = temp.mkdirSync('atom-home')
     fs.writeFileSync(path.join(atomHome, 'config.cson'), fs.readFileSync(path.join(__dirname, 'fixtures', 'atom-home', 'config.cson')))
+    fs.removeSync(path.join(atomHome, 'storage'))
+
     tempDirPath = temp.mkdirSync("empty-dir")
     otherTempDirPath = temp.mkdirSync("another-temp-dir")
 
@@ -26,8 +28,6 @@ describe "Starting Atom", ->
     it "opens the parent directory and creates an empty text editor", ->
       runAtom [path.join(tempDirPath, "new-file")], {ATOM_HOME: atomHome}, (client) ->
         client
-          .waitForWindowCount(1, 1000)
-          .waitForExist("atom-workspace", 5000)
           .waitForPaneItemCount(1, 1000)
 
           .treeViewRootDirectories()
@@ -52,8 +52,6 @@ describe "Starting Atom", ->
 
       runAtom ["#{filePath}:3"], {ATOM_HOME: atomHome}, (client) ->
         client
-          .waitForWindowCount(1, 1000)
-          .waitForExist("atom-workspace", 5000)
           .waitForPaneItemCount(1, 1000)
           .waitForExist("atom-text-editor", 5000)
           .then (exists) -> expect(exists).toBe true
@@ -77,8 +75,6 @@ describe "Starting Atom", ->
 
       runAtom ["#{filePath}:2:2"], {ATOM_HOME: atomHome}, (client) ->
         client
-          .waitForWindowCount(1, 1000)
-          .waitForExist("atom-workspace", 5000)
           .waitForPaneItemCount(1, 1000)
           .waitForExist("atom-text-editor", 5000)
           .then (exists) -> expect(exists).toBe true
@@ -95,8 +91,6 @@ describe "Starting Atom", ->
       filePath = path.join(tempDirPath, "new-file")
       runAtom ["#{filePath}:  "], {ATOM_HOME: atomHome}, (client) ->
         client
-          .waitForWindowCount(1, 1000)
-          .waitForExist("atom-workspace", 5000)
           .waitForPaneItemCount(1, 1000)
           .waitForExist("atom-text-editor", 5000)
           .then (exists) -> expect(exists).toBe true
@@ -111,8 +105,6 @@ describe "Starting Atom", ->
 
       runAtom [path.join(tempDirPath, "new-file")], {ATOM_HOME: atomHome}, (client) ->
         client
-          .waitForWindowCount(1, 1000)
-          .waitForExist("atom-workspace", 5000)
           .waitForPaneItemCount(1, 5000)
 
           # Opening another file reuses the same window and does not change the
@@ -129,7 +121,6 @@ describe "Starting Atom", ->
           .waitForNewWindow(->
             @startAnotherAtom([otherTempDirPath], ATOM_HOME: atomHome)
           , 5000)
-          .waitForExist("atom-workspace", 5000)
           .waitForPaneItemCount(0, 1000)
           .treeViewRootDirectories()
           .then ({value}) -> expect(value).toEqual([otherTempDirPath])
@@ -138,14 +129,12 @@ describe "Starting Atom", ->
     it "remembers the state of the window", ->
       runAtom [tempDirPath], {ATOM_HOME: atomHome}, (client) ->
         client
-          .waitForExist("atom-workspace", 5000)
           .waitForPaneItemCount(0, 3000)
           .execute -> atom.workspace.open()
           .waitForPaneItemCount(1, 3000)
 
       runAtom [tempDirPath], {ATOM_HOME: atomHome}, (client) ->
         client
-          .waitForExist("atom-workspace", 5000)
           .waitForPaneItemCount(1, 5000)
 
   describe "opening multiple directories simultaneously", ->
@@ -155,14 +144,12 @@ describe "Starting Atom", ->
 
       runAtom [tempDirPath, otherTempDirPath], {ATOM_HOME: atomHome}, (client) ->
         client
-          .waitForExist("atom-workspace", 5000)
           .treeViewRootDirectories()
           .then ({value}) -> expect(value).toEqual([tempDirPath, otherTempDirPath])
 
           # Opening one of those directories again reuses the same window and
           # does not change the project paths.
           .startAnotherAtom([nestedDir], ATOM_HOME: atomHome)
-          .waitForExist("atom-workspace", 5000)
           .treeViewRootDirectories()
           .then ({value}) -> expect(value).toEqual([tempDirPath, otherTempDirPath])
 
@@ -170,7 +157,6 @@ describe "Starting Atom", ->
     it "reuses that window to open a directory", ->
       runAtom [], {ATOM_HOME: atomHome}, (client) ->
         client
-          .waitForExist("atom-workspace")
           .treeViewRootDirectories()
           .then ({value}) -> expect(value).toEqual([])
 
@@ -186,7 +172,6 @@ describe "Starting Atom", ->
     it "opens a new window with a single untitled buffer", ->
       runAtom [], {ATOM_HOME: atomHome}, (client) ->
         client
-          .waitForExist("atom-workspace")
           .waitForPaneItemCount(1, 5000)
 
           # Opening with no file paths always creates a new window, even if
@@ -194,17 +179,24 @@ describe "Starting Atom", ->
           .waitForNewWindow(->
             @startAnotherAtom([], ATOM_HOME: atomHome)
           , 5000)
-          .waitForExist("atom-workspace")
           .waitForPaneItemCount(1, 5000)
+
+    it "doesn't open a new window if openEmptyEditorOnStart is disabled", ->
+      configPath = path.join(atomHome, 'config.cson')
+      config = CSON.readFileSync(configPath)
+      config['*'].core = {openEmptyEditorOnStart: false}
+      CSON.writeFileSync(configPath, config)
+
+      runAtom [], {ATOM_HOME: atomHome}, (client) ->
+        client
+          .waitForPaneItemCount(0, 5000)
 
     it "reopens any previously opened windows", ->
       runAtom [tempDirPath], {ATOM_HOME: atomHome}, (client) ->
         client
-          .waitForExist("atom-workspace")
           .waitForNewWindow(->
             @startAnotherAtom([otherTempDirPath], ATOM_HOME: atomHome)
           , 5000)
-          .waitForExist("atom-workspace")
 
       runAtom [], {ATOM_HOME: atomHome}, (client) ->
         windowProjectPaths = []
@@ -213,12 +205,10 @@ describe "Starting Atom", ->
           .waitForWindowCount(2, 10000)
           .then ({value: windowHandles}) ->
             @window(windowHandles[0])
-            .waitForExist("atom-workspace")
             .treeViewRootDirectories()
             .then ({value: directories}) -> windowProjectPaths.push(directories)
 
             .window(windowHandles[1])
-            .waitForExist("atom-workspace")
             .treeViewRootDirectories()
             .then ({value: directories}) -> windowProjectPaths.push(directories)
 
@@ -227,3 +217,11 @@ describe "Starting Atom", ->
                 [tempDirPath]
                 [otherTempDirPath]
               ].sort()
+
+  describe "opening a remote directory", ->
+    it "opens the parent directory and creates an empty text editor", ->
+      remoteDirectory = 'remote://server:3437/some/directory/path'
+      runAtom [remoteDirectory], {ATOM_HOME: atomHome}, (client) ->
+        client
+          .treeViewRootDirectories()
+          .then ({value}) -> expect(value).toEqual([remoteDirectory])

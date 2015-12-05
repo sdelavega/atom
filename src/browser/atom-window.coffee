@@ -1,5 +1,6 @@
 BrowserWindow = require 'browser-window'
 app = require 'app'
+dialog = require 'dialog'
 path = require 'path'
 fs = require 'fs'
 url = require 'url'
@@ -18,19 +19,19 @@ class AtomWindow
   isSpec: null
 
   constructor: (settings={}) ->
-    {@resourcePath, pathToOpen, locationsToOpen, @isSpec, @exitWhenDone, @safeMode, @devMode, @apiPreviewMode} = settings
+    {@resourcePath, pathToOpen, locationsToOpen, @isSpec, @headless, @safeMode, @devMode} = settings
     locationsToOpen ?= [{pathToOpen}] if pathToOpen
     locationsToOpen ?= []
-
-    # Normalize to make sure drive letter case is consistent on Windows
-    @resourcePath = path.normalize(@resourcePath) if @resourcePath
 
     options =
       show: false
       title: 'Atom'
       'web-preferences':
         'direct-write': true
-        'subpixel-font-scaling': false
+
+    if @isSpec
+      options['web-preferences']['page-visibility'] = true
+
     # Don't set icon on Windows so the exe's ico will be used as window and
     # taskbar's icon. See https://github.com/atom/atom/issues/4811 for more.
     if process.platform is 'linux'
@@ -47,7 +48,7 @@ class AtomWindow
     loadSettings.resourcePath = @resourcePath
     loadSettings.devMode ?= false
     loadSettings.safeMode ?= false
-    loadSettings.apiPreviewMode ?= false
+    loadSettings.atomHome = process.env.ATOM_HOME
 
     # Only send to the first non-spec window created
     if @constructor.includeShellLoadTime and not @isSpec
@@ -87,17 +88,16 @@ class AtomWindow
       hash: encodeURIComponent(JSON.stringify(loadSettings))
 
   getLoadSettings: ->
-    if @browserWindow.webContents.loaded
+    if @browserWindow.webContents? and not @browserWindow.webContents.isLoading()
       hash = url.parse(@browserWindow.webContents.getUrl()).hash.substr(1)
       JSON.parse(decodeURIComponent(hash))
 
   hasProjectPath: -> @getLoadSettings().initialPaths?.length > 0
 
   setupContextMenu: ->
-    ContextMenu = null
+    ContextMenu = require './context-menu'
 
     @browserWindow.on 'context-menu', (menuTemplate) =>
-      ContextMenu ?= require './context-menu'
       new ContextMenu(menuTemplate, this)
 
   containsPaths: (paths) ->
@@ -127,7 +127,6 @@ class AtomWindow
     @browserWindow.on 'unresponsive', =>
       return if @isSpec
 
-      dialog = require 'dialog'
       chosen = dialog.showMessageBox @browserWindow,
         type: 'warning'
         buttons: ['Close', 'Keep Waiting']
@@ -136,9 +135,8 @@ class AtomWindow
       @browserWindow.destroy() if chosen is 0
 
     @browserWindow.webContents.on 'crashed', =>
-      global.atomApplication.exit(100) if @exitWhenDone
+      global.atomApplication.exit(100) if @headless
 
-      dialog = require 'dialog'
       chosen = dialog.showMessageBox @browserWindow,
         type: 'warning'
         buttons: ['Close Window', 'Reload', 'Keep It Open']
@@ -147,6 +145,10 @@ class AtomWindow
       switch chosen
         when 0 then @browserWindow.destroy()
         when 1 then @browserWindow.restart()
+
+    @browserWindow.webContents.on 'will-navigate', (event, url) =>
+      unless url is @browserWindow.webContents.getUrl()
+        event.preventDefault()
 
     @setupContextMenu()
 
@@ -166,7 +168,6 @@ class AtomWindow
 
   openLocations: (locationsToOpen) ->
     if @loaded
-      @focus()
       @sendMessage 'open-locations', locationsToOpen
     else
       @browserWindow.once 'window:loaded', => @openLocations(locationsToOpen)

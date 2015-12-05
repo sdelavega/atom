@@ -4,6 +4,7 @@ TextBuffer = require 'text-buffer'
 {Point, Range} = TextBuffer
 TextEditor = require '../src/text-editor'
 TextEditorPresenter = require '../src/text-editor-presenter'
+FakeLinesYardstick = require './fake-lines-yardstick'
 
 describe "TextEditorPresenter", ->
   # These `describe` and `it` blocks mirror the structure of the ::state object.
@@ -17,31 +18,40 @@ describe "TextEditorPresenter", ->
       spyOn(window, "clearInterval").andCallFake window.fakeClearInterval
 
       buffer = new TextBuffer(filePath: require.resolve('./fixtures/sample.js'))
-      editor = new TextEditor({buffer})
+      editor = atom.workspace.buildTextEditor({buffer})
       waitsForPromise -> buffer.load()
 
     afterEach ->
       editor.destroy()
       buffer.destroy()
 
-    buildPresenter = (params={}) ->
+    buildPresenterWithoutMeasurements = (params={}) ->
       _.defaults params,
         model: editor
-        explicitHeight: 130
+        config: atom.config
         contentFrameWidth: 500
-        windowWidth: 500
-        windowHeight: 130
-        boundingClientRect: {left: 0, top: 0, width: 500, height: 130}
-        gutterWidth: 0
-        lineHeight: 10
-        baseCharacterWidth: 10
-        horizontalScrollbarHeight: 10
-        verticalScrollbarWidth: 10
-        scrollTop: 0
-        scrollLeft: 0
-        lineOverdrawMargin: 0
+      presenter = new TextEditorPresenter(params)
+      presenter.setLinesYardstick(new FakeLinesYardstick(editor, presenter))
+      presenter
 
-      new TextEditorPresenter(params)
+    buildPresenter = (params={}) ->
+      presenter = buildPresenterWithoutMeasurements(params)
+      presenter.setScrollTop(params.scrollTop) if params.scrollTop?
+      presenter.setScrollLeft(params.scrollLeft) if params.scrollLeft?
+      presenter.setExplicitHeight(params.explicitHeight ? 130)
+      presenter.setWindowSize(params.windowWidth ? 500, params.windowHeight ? 130)
+      presenter.setBoundingClientRect(params.boundingClientRect ? {
+        left: 0
+        top: 0
+        width: 500
+        height: 130
+      })
+      presenter.setGutterWidth(params.gutterWidth ? 0)
+      presenter.setLineHeight(params.lineHeight ? 10)
+      presenter.setBaseCharacterWidth(params.baseCharacterWidth ? 10)
+      presenter.setHorizontalScrollbarHeight(params.horizontalScrollbarHeight ? 10)
+      presenter.setVerticalScrollbarWidth(params.verticalScrollbarWidth ? 10)
+      presenter
 
     expectValues = (actual, expected) ->
       for key, value of expected
@@ -58,6 +68,213 @@ describe "TextEditorPresenter", ->
     expectStateUpdate = (presenter, fn) -> expectStateUpdatedToBe(true, presenter, fn)
 
     expectNoStateUpdate = (presenter, fn) -> expectStateUpdatedToBe(false, presenter, fn)
+
+    waitsForStateToUpdate = (presenter, fn) ->
+      waitsFor "presenter state to update", 1000, (done) ->
+        fn?()
+        disposable = presenter.onDidUpdateState ->
+          disposable.dispose()
+          process.nextTick(done)
+
+    tiledContentContract = (stateFn) ->
+      it "contains states for tiles that are visible on screen", ->
+        presenter = buildPresenter(explicitHeight: 6, scrollTop: 0, lineHeight: 1, tileSize: 2)
+
+        expectValues stateFn(presenter).tiles[0], {
+          top: 0
+        }
+        expectValues stateFn(presenter).tiles[2], {
+          top: 2
+        }
+        expectValues stateFn(presenter).tiles[4], {
+          top: 4
+        }
+        expectValues stateFn(presenter).tiles[6], {
+          top: 6
+        }
+
+        expect(stateFn(presenter).tiles[8]).toBeUndefined()
+
+        expectStateUpdate presenter, -> presenter.setScrollTop(3)
+
+        expect(stateFn(presenter).tiles[0]).toBeUndefined()
+
+        expectValues stateFn(presenter).tiles[2], {
+          top: -1
+        }
+        expectValues stateFn(presenter).tiles[4], {
+          top: 1
+        }
+        expectValues stateFn(presenter).tiles[6], {
+          top: 3
+        }
+        expectValues stateFn(presenter).tiles[8], {
+          top: 5
+        }
+        expectValues stateFn(presenter).tiles[10], {
+          top: 7
+        }
+
+        expect(stateFn(presenter).tiles[12]).toBeUndefined()
+
+      it "includes state for tiles containing screen rows to measure", ->
+        presenter = buildPresenter(explicitHeight: 6, scrollTop: 0, lineHeight: 1, tileSize: 2)
+        presenter.setScreenRowsToMeasure([10, 12])
+
+        expect(stateFn(presenter).tiles[0]).toBeDefined()
+        expect(stateFn(presenter).tiles[2]).toBeDefined()
+        expect(stateFn(presenter).tiles[4]).toBeDefined()
+        expect(stateFn(presenter).tiles[6]).toBeDefined()
+        expect(stateFn(presenter).tiles[8]).toBeUndefined()
+        expect(stateFn(presenter).tiles[10]).toBeDefined()
+        expect(stateFn(presenter).tiles[12]).toBeDefined()
+
+        # clearing additional rows won't trigger a state update
+        expectNoStateUpdate presenter, -> presenter.clearScreenRowsToMeasure()
+
+        expect(stateFn(presenter).tiles[0]).toBeDefined()
+        expect(stateFn(presenter).tiles[2]).toBeDefined()
+        expect(stateFn(presenter).tiles[4]).toBeDefined()
+        expect(stateFn(presenter).tiles[6]).toBeDefined()
+        expect(stateFn(presenter).tiles[8]).toBeUndefined()
+        expect(stateFn(presenter).tiles[10]).toBeDefined()
+        expect(stateFn(presenter).tiles[12]).toBeDefined()
+
+        # when another change triggers a state update we remove useless lines
+        expectStateUpdate presenter, -> presenter.setScrollTop(1)
+
+        expect(stateFn(presenter).tiles[0]).toBeDefined()
+        expect(stateFn(presenter).tiles[2]).toBeDefined()
+        expect(stateFn(presenter).tiles[4]).toBeDefined()
+        expect(stateFn(presenter).tiles[6]).toBeDefined()
+        expect(stateFn(presenter).tiles[8]).toBeDefined()
+        expect(stateFn(presenter).tiles[10]).toBeUndefined()
+        expect(stateFn(presenter).tiles[12]).toBeUndefined()
+
+      it "excludes invalid tiles for screen rows to measure", ->
+        presenter = buildPresenter(explicitHeight: 6, scrollTop: 0, lineHeight: 1, tileSize: 2)
+        presenter.setScreenRowsToMeasure([20, 30]) # unexisting rows
+
+        expect(stateFn(presenter).tiles[0]).toBeDefined()
+        expect(stateFn(presenter).tiles[2]).toBeDefined()
+        expect(stateFn(presenter).tiles[4]).toBeDefined()
+        expect(stateFn(presenter).tiles[6]).toBeDefined()
+        expect(stateFn(presenter).tiles[8]).toBeUndefined()
+        expect(stateFn(presenter).tiles[10]).toBeUndefined()
+        expect(stateFn(presenter).tiles[12]).toBeUndefined()
+
+        presenter.setScreenRowsToMeasure([12])
+        buffer.deleteRows(12, 13)
+
+        expect(stateFn(presenter).tiles[12]).toBeUndefined()
+
+      it "includes state for all tiles if no external ::explicitHeight is assigned", ->
+        presenter = buildPresenter(explicitHeight: null, tileSize: 2)
+        expect(stateFn(presenter).tiles[0]).toBeDefined()
+        expect(stateFn(presenter).tiles[12]).toBeDefined()
+
+      it "is empty until all of the required measurements are assigned", ->
+        presenter = buildPresenterWithoutMeasurements()
+        expect(stateFn(presenter).tiles).toEqual({})
+
+        presenter.setExplicitHeight(25)
+        expect(stateFn(presenter).tiles).toEqual({})
+
+        # Sets scroll row from model's logical position
+        presenter.setLineHeight(10)
+        expect(stateFn(presenter).tiles).not.toEqual({})
+
+      it "updates when ::scrollTop changes", ->
+        presenter = buildPresenter(explicitHeight: 6, scrollTop: 0, lineHeight: 1, tileSize: 2)
+
+        expect(stateFn(presenter).tiles[0]).toBeDefined()
+        expect(stateFn(presenter).tiles[2]).toBeDefined()
+        expect(stateFn(presenter).tiles[4]).toBeDefined()
+        expect(stateFn(presenter).tiles[6]).toBeDefined()
+        expect(stateFn(presenter).tiles[8]).toBeUndefined()
+
+        expectStateUpdate presenter, -> presenter.setScrollTop(2)
+
+        expect(stateFn(presenter).tiles[0]).toBeUndefined()
+        expect(stateFn(presenter).tiles[2]).toBeDefined()
+        expect(stateFn(presenter).tiles[4]).toBeDefined()
+        expect(stateFn(presenter).tiles[6]).toBeDefined()
+        expect(stateFn(presenter).tiles[8]).toBeDefined()
+        expect(stateFn(presenter).tiles[10]).toBeUndefined()
+
+      it "updates when ::explicitHeight changes", ->
+        presenter = buildPresenter(explicitHeight: 6, scrollTop: 0, lineHeight: 1, tileSize: 2)
+
+        expect(stateFn(presenter).tiles[0]).toBeDefined()
+        expect(stateFn(presenter).tiles[2]).toBeDefined()
+        expect(stateFn(presenter).tiles[4]).toBeDefined()
+        expect(stateFn(presenter).tiles[6]).toBeDefined()
+        expect(stateFn(presenter).tiles[8]).toBeUndefined()
+
+        expectStateUpdate presenter, -> presenter.setExplicitHeight(8)
+
+        expect(stateFn(presenter).tiles[0]).toBeDefined()
+        expect(stateFn(presenter).tiles[2]).toBeDefined()
+        expect(stateFn(presenter).tiles[4]).toBeDefined()
+        expect(stateFn(presenter).tiles[6]).toBeDefined()
+        expect(stateFn(presenter).tiles[8]).toBeDefined()
+        expect(stateFn(presenter).tiles[10]).toBeUndefined()
+
+      it "updates when ::lineHeight changes", ->
+        presenter = buildPresenter(explicitHeight: 6, scrollTop: 0, lineHeight: 1, tileSize: 2)
+
+        expect(stateFn(presenter).tiles[0]).toBeDefined()
+        expect(stateFn(presenter).tiles[2]).toBeDefined()
+        expect(stateFn(presenter).tiles[4]).toBeDefined()
+        expect(stateFn(presenter).tiles[6]).toBeDefined()
+        expect(stateFn(presenter).tiles[8]).toBeUndefined()
+
+        expectStateUpdate presenter, -> presenter.setLineHeight(4)
+
+        expect(stateFn(presenter).tiles[0]).toBeDefined()
+        expect(stateFn(presenter).tiles[2]).toBeDefined()
+        expect(stateFn(presenter).tiles[4]).toBeUndefined()
+        expect(stateFn(presenter).tiles[6]).toBeDefined()
+        expect(stateFn(presenter).tiles[8]).toBeUndefined()
+
+      it "does not remove out-of-view tiles corresponding to ::mouseWheelScreenRow until ::stoppedScrollingDelay elapses", ->
+        presenter = buildPresenter(explicitHeight: 6, scrollTop: 0, lineHeight: 1, tileSize: 2, stoppedScrollingDelay: 200)
+
+        expect(stateFn(presenter).tiles[0]).toBeDefined()
+        expect(stateFn(presenter).tiles[6]).toBeDefined()
+        expect(stateFn(presenter).tiles[8]).toBeUndefined()
+
+        presenter.setMouseWheelScreenRow(0)
+        expectStateUpdate presenter, -> presenter.setScrollTop(4)
+
+        expect(stateFn(presenter).tiles[0]).toBeDefined()
+        expect(stateFn(presenter).tiles[2]).toBeUndefined()
+        expect(stateFn(presenter).tiles[4]).toBeDefined()
+        expect(stateFn(presenter).tiles[12]).toBeUndefined()
+
+        expectStateUpdate presenter, -> advanceClock(200)
+
+        expect(stateFn(presenter).tiles[0]).toBeUndefined()
+        expect(stateFn(presenter).tiles[2]).toBeUndefined()
+        expect(stateFn(presenter).tiles[4]).toBeDefined()
+        expect(stateFn(presenter).tiles[12]).toBeUndefined()
+
+
+        # should clear ::mouseWheelScreenRow after stoppedScrollingDelay elapses even if we don't scroll first
+        presenter.setMouseWheelScreenRow(4)
+        advanceClock(200)
+        expectStateUpdate presenter, -> presenter.setScrollTop(6)
+        expect(stateFn(presenter).tiles[4]).toBeUndefined()
+
+      it "does not preserve deleted on-screen tiles even if they correspond to ::mouseWheelScreenRow", ->
+        presenter = buildPresenter(explicitHeight: 6, scrollTop: 0, lineHeight: 1, tileSize: 2, stoppedScrollingDelay: 200)
+
+        presenter.setMouseWheelScreenRow(2)
+
+        expectStateUpdate presenter, -> editor.setText("")
+
+        expect(stateFn(presenter).tiles[2]).toBeUndefined()
+        expect(stateFn(presenter).tiles[0]).toBeDefined()
 
     describe "during state retrieval", ->
       it "does not trigger onDidUpdateState events", ->
@@ -140,15 +357,7 @@ describe "TextEditorPresenter", ->
           expectStateUpdate presenter, -> presenter.setContentFrameWidth(10 * maxLineLength + 20)
           expect(presenter.getState().horizontalScrollbar.scrollWidth).toBe 10 * maxLineLength + 20
 
-        it "updates when the ::baseCharacterWidth changes", ->
-          maxLineLength = editor.getMaxScreenLineLength()
-          presenter = buildPresenter(contentFrameWidth: 50, baseCharacterWidth: 10)
-
-          expect(presenter.getState().horizontalScrollbar.scrollWidth).toBe 10 * maxLineLength + 1
-          expectStateUpdate presenter, -> presenter.setBaseCharacterWidth(15)
-          expect(presenter.getState().horizontalScrollbar.scrollWidth).toBe 15 * maxLineLength + 1
-
-        it "updates when the scoped character widths change", ->
+        it "updates when character widths change", ->
           waitsForPromise -> atom.packages.activatePackage('language-javascript')
 
           runs ->
@@ -156,7 +365,9 @@ describe "TextEditorPresenter", ->
             presenter = buildPresenter(contentFrameWidth: 50, baseCharacterWidth: 10)
 
             expect(presenter.getState().horizontalScrollbar.scrollWidth).toBe 10 * maxLineLength + 1
-            expectStateUpdate presenter, -> presenter.setScopedCharacterWidth(['source.js', 'support.function.js'], 'p', 20)
+            expectStateUpdate presenter, ->
+              presenter.getLinesYardstick().setScopedCharacterWidth(['source.js', 'support.function.js'], 'p', 20)
+              presenter.characterWidthsChanged()
             expect(presenter.getState().horizontalScrollbar.scrollWidth).toBe (10 * (maxLineLength - 2)) + (20 * 2) + 1 # 2 of the characters are 20px wide now instead of 10px wide
 
         it "updates when ::softWrapped changes on the editor", ->
@@ -207,6 +418,18 @@ describe "TextEditorPresenter", ->
           presenter = buildPresenter(scrollLeft: 10, verticalScrollbarWidth: 10, contentFrameWidth: 500)
           expectStateUpdate presenter, -> presenter.setScrollLeft(-300)
           expect(presenter.getState().horizontalScrollbar.scrollLeft).toBe 0
+
+        it "is always 0 when soft wrapping is enabled", ->
+          presenter = buildPresenter(scrollLeft: 0, verticalScrollbarWidth: 0, contentFrameWidth: 85, baseCharacterWidth: 10)
+
+          editor.setSoftWrapped(false)
+          presenter.setScrollLeft(Infinity)
+          expect(presenter.getState().content.scrollLeft).toBeGreaterThan 0
+
+          editor.setSoftWrapped(true)
+          expect(presenter.getState().content.scrollLeft).toBe 0
+          presenter.setScrollLeft(10)
+          expect(presenter.getState().content.scrollLeft).toBe 0
 
     describe ".verticalScrollbar", ->
       describe ".visible", ->
@@ -355,11 +578,11 @@ describe "TextEditorPresenter", ->
           expectValues presenter.getState().hiddenInput, {top: 0, left: 0}
 
           expectStateUpdate presenter, -> editor.setCursorBufferPosition([11, 43])
-          expectValues presenter.getState().hiddenInput, {top: 11 * 10 - editor.getScrollTop(), left: 43 * 10 - editor.getScrollLeft()}
+          expectValues presenter.getState().hiddenInput, {top: 11 * 10 - presenter.getScrollTop(), left: 43 * 10 - presenter.getScrollLeft()}
 
           newCursor = null
           expectStateUpdate presenter, -> newCursor = editor.addCursorAtBufferPosition([6, 10])
-          expectValues presenter.getState().hiddenInput, {top: (6 * 10) - editor.getScrollTop(), left: (10 * 10) - editor.getScrollLeft()}
+          expectValues presenter.getState().hiddenInput, {top: (6 * 10) - presenter.getScrollTop(), left: (10 * 10) - presenter.getScrollLeft()}
 
           expectStateUpdate presenter, -> newCursor.destroy()
           expectValues presenter.getState().hiddenInput, {top: 50 - 10, left: 300 - 10}
@@ -387,7 +610,9 @@ describe "TextEditorPresenter", ->
             expectStateUpdate presenter, -> presenter.setBaseCharacterWidth(15)
             expect(presenter.getState().hiddenInput.width).toBe 15
 
-            expectStateUpdate presenter, -> presenter.setScopedCharacterWidth(['source.js', 'storage.modifier.js'], 'r', 20)
+            expectStateUpdate presenter, ->
+              presenter.getLinesYardstick().setScopedCharacterWidth(['source.js', 'storage.type.var.js'], 'r', 20)
+              presenter.characterWidthsChanged()
             expect(presenter.getState().hiddenInput.width).toBe 20
 
         it "is 2px at the end of lines", ->
@@ -399,16 +624,31 @@ describe "TextEditorPresenter", ->
       describe ".scrollingVertically", ->
         it "is true for ::stoppedScrollingDelay milliseconds following a changes to ::scrollTop", ->
           presenter = buildPresenter(scrollTop: 10, stoppedScrollingDelay: 200, explicitHeight: 100)
+          expect(presenter.getState().content.scrollingVertically).toBe true
+          advanceClock(300)
           expect(presenter.getState().content.scrollingVertically).toBe false
           expectStateUpdate presenter, -> presenter.setScrollTop(0)
           expect(presenter.getState().content.scrollingVertically).toBe true
           advanceClock(100)
           expect(presenter.getState().content.scrollingVertically).toBe true
           presenter.setScrollTop(10)
+          presenter.getState() # commits scroll position
           advanceClock(100)
           expect(presenter.getState().content.scrollingVertically).toBe true
           expectStateUpdate presenter, -> advanceClock(100)
           expect(presenter.getState().content.scrollingVertically).toBe false
+
+      describe ".maxHeight", ->
+        it "changes based on boundingClientRect", ->
+          presenter = buildPresenter(scrollTop: 0, lineHeight: 10)
+
+          expectStateUpdate presenter, ->
+            presenter.setBoundingClientRect(left: 0, top: 0, height: 20, width: 0)
+          expect(presenter.getState().content.maxHeight).toBe(20)
+
+          expectStateUpdate presenter, ->
+            presenter.setBoundingClientRect(left: 0, top: 0, height: 50, width: 0)
+          expect(presenter.getState().content.maxHeight).toBe(50)
 
       describe ".scrollHeight", ->
         it "is initialized based on the lineHeight, the number of lines, and the height", ->
@@ -454,6 +694,20 @@ describe "TextEditorPresenter", ->
           presenter = buildPresenter(explicitHeight: 100, contentFrameWidth: 10 * maxLineLength + 20, baseCharacterWidth: 10, verticalScrollbarWidth: 10)
           expect(presenter.getState().content.scrollWidth).toBe 10 * maxLineLength + 20 - 10 # subtract vertical scrollbar width
 
+        describe "when the longest screen row is the first one and it's hidden", ->
+          it "doesn't compute an invalid value (regression)", ->
+            presenter = buildPresenter(tileSize: 2, contentFrameWidth: 10, explicitHeight: 20)
+            editor.setText """
+            a very long long long long long long line
+            b
+            c
+            d
+            e
+            """
+
+            expectStateUpdate presenter, -> presenter.setScrollTop(40)
+            expect(presenter.getState().content.scrollWidth).toBe 10 * editor.getMaxScreenLineLength() + 1
+
         it "updates when the ::contentFrameWidth changes", ->
           maxLineLength = editor.getMaxScreenLineLength()
           presenter = buildPresenter(contentFrameWidth: 50, baseCharacterWidth: 10)
@@ -462,15 +716,7 @@ describe "TextEditorPresenter", ->
           expectStateUpdate presenter, -> presenter.setContentFrameWidth(10 * maxLineLength + 20)
           expect(presenter.getState().content.scrollWidth).toBe 10 * maxLineLength + 20
 
-        it "updates when the ::baseCharacterWidth changes", ->
-          maxLineLength = editor.getMaxScreenLineLength()
-          presenter = buildPresenter(contentFrameWidth: 50, baseCharacterWidth: 10)
-
-          expect(presenter.getState().content.scrollWidth).toBe 10 * maxLineLength + 1
-          expectStateUpdate presenter, -> presenter.setBaseCharacterWidth(15)
-          expect(presenter.getState().content.scrollWidth).toBe 15 * maxLineLength + 1
-
-        it "updates when the scoped character widths change", ->
+        it "updates when character widths change", ->
           waitsForPromise -> atom.packages.activatePackage('language-javascript')
 
           runs ->
@@ -478,7 +724,9 @@ describe "TextEditorPresenter", ->
             presenter = buildPresenter(contentFrameWidth: 50, baseCharacterWidth: 10)
 
             expect(presenter.getState().content.scrollWidth).toBe 10 * maxLineLength + 1
-            expectStateUpdate presenter, -> presenter.setScopedCharacterWidth(['source.js', 'support.function.js'], 'p', 20)
+            expectStateUpdate presenter, ->
+              presenter.getLinesYardstick().setScopedCharacterWidth(['source.js', 'support.function.js'], 'p', 20)
+              presenter.characterWidthsChanged()
             expect(presenter.getState().content.scrollWidth).toBe (10 * (maxLineLength - 2)) + (20 * 2) + 1 # 2 of the characters are 20px wide now instead of 10px wide
 
         it "updates when ::softWrapped changes on the editor", ->
@@ -505,30 +753,115 @@ describe "TextEditorPresenter", ->
           expect(presenter.getState().content.scrollWidth).toBe 10 * editor.getMaxScreenLineLength() + 1
 
       describe ".scrollTop", ->
+        it "doesn't get stuck when repeatedly setting the same non-integer position in a scroll event listener", ->
+          presenter = buildPresenter(scrollTop: 0, lineHeight: 10, explicitHeight: 20)
+          expect(presenter.getState().content.scrollTop).toBe(0)
+
+          presenter.onDidChangeScrollTop ->
+            presenter.setScrollTop(1.5)
+            presenter.getState() # trigger scroll update
+
+          presenter.setScrollTop(1.5)
+          presenter.getState() # trigger scroll update
+
+          expect(presenter.getScrollTop()).toBe(2)
+          expect(presenter.getRealScrollTop()).toBe(1.5)
+
+        it "changes based on the scroll operation that was performed last", ->
+          presenter = buildPresenter(scrollTop: 0, lineHeight: 10, explicitHeight: 20)
+          expect(presenter.getState().content.scrollTop).toBe(0)
+
+          presenter.setScrollTop(20)
+          editor.setCursorBufferPosition([5, 0])
+
+          expect(presenter.getState().content.scrollTop).toBe(50)
+
+          editor.setCursorBufferPosition([8, 0])
+          presenter.setScrollTop(10)
+
+          expect(presenter.getState().content.scrollTop).toBe(10)
+
+        it "corresponds to the passed logical coordinates when building the presenter", ->
+          editor.setFirstVisibleScreenRow(4)
+          presenter = buildPresenter(lineHeight: 10, explicitHeight: 20)
+          expect(presenter.getState().content.scrollTop).toBe(40)
+
         it "tracks the value of ::scrollTop", ->
           presenter = buildPresenter(scrollTop: 10, lineHeight: 10, explicitHeight: 20)
           expect(presenter.getState().content.scrollTop).toBe 10
           expectStateUpdate presenter, -> presenter.setScrollTop(50)
           expect(presenter.getState().content.scrollTop).toBe 50
 
+        it "keeps the model up to date with the corresponding logical coordinates", ->
+          presenter = buildPresenter(scrollTop: 0, explicitHeight: 20, horizontalScrollbarHeight: 10, lineHeight: 10)
+
+          expectStateUpdate presenter, -> presenter.setScrollTop(50)
+          presenter.getState() # commits scroll position
+          expect(editor.getFirstVisibleScreenRow()).toBe 5
+
+          expectStateUpdate presenter, -> presenter.setScrollTop(57)
+          presenter.getState() # commits scroll position
+          expect(editor.getFirstVisibleScreenRow()).toBe 6
+
+        it "reassigns the scrollTop if it exceeds the max possible value after lines are removed", ->
+          presenter = buildPresenter(scrollTop: 80, lineHeight: 10, explicitHeight: 50, horizontalScrollbarHeight: 0)
+          expect(presenter.getState().content.scrollTop).toBe(80)
+          buffer.deleteRows(10, 9, 8)
+          expect(presenter.getState().content.scrollTop).toBe(60)
+
+        it "is always rounded to the nearest integer", ->
+          presenter = buildPresenter(scrollTop: 10, lineHeight: 10, explicitHeight: 20)
+          expect(presenter.getState().content.scrollTop).toBe 10
+          expectStateUpdate presenter, -> presenter.setScrollTop(11.4)
+          expect(presenter.getState().content.scrollTop).toBe 11
+          expectStateUpdate presenter, -> presenter.setScrollTop(12.6)
+          expect(presenter.getState().content.scrollTop).toBe 13
+
+        it "scrolls down automatically when the model is changed", ->
+          presenter = buildPresenter(scrollTop: 0, lineHeight: 10, explicitHeight: 20)
+
+          editor.setText("")
+          editor.insertNewline()
+          expect(presenter.getState().content.scrollTop).toBe(0)
+
+          editor.insertNewline()
+          expect(presenter.getState().content.scrollTop).toBe(10)
+
         it "never exceeds the computed scroll height minus the computed client height", ->
+          didChangeScrollTopSpy = jasmine.createSpy()
           presenter = buildPresenter(scrollTop: 10, lineHeight: 10, explicitHeight: 50, horizontalScrollbarHeight: 10)
+          presenter.onDidChangeScrollTop(didChangeScrollTopSpy)
+
           expectStateUpdate presenter, -> presenter.setScrollTop(100)
           expect(presenter.getState().content.scrollTop).toBe presenter.scrollHeight - presenter.clientHeight
+          expect(presenter.getRealScrollTop()).toBe presenter.scrollHeight - presenter.clientHeight
+          expect(didChangeScrollTopSpy).toHaveBeenCalledWith presenter.scrollHeight - presenter.clientHeight
 
+          didChangeScrollTopSpy.reset()
           expectStateUpdate presenter, -> presenter.setExplicitHeight(60)
           expect(presenter.getState().content.scrollTop).toBe presenter.scrollHeight - presenter.clientHeight
+          expect(presenter.getRealScrollTop()).toBe presenter.scrollHeight - presenter.clientHeight
+          expect(didChangeScrollTopSpy).toHaveBeenCalledWith presenter.scrollHeight - presenter.clientHeight
 
+          didChangeScrollTopSpy.reset()
           expectStateUpdate presenter, -> presenter.setHorizontalScrollbarHeight(5)
           expect(presenter.getState().content.scrollTop).toBe presenter.scrollHeight - presenter.clientHeight
+          expect(presenter.getRealScrollTop()).toBe presenter.scrollHeight - presenter.clientHeight
+          expect(didChangeScrollTopSpy).toHaveBeenCalledWith presenter.scrollHeight - presenter.clientHeight
 
+          didChangeScrollTopSpy.reset()
           expectStateUpdate presenter, -> editor.getBuffer().delete([[8, 0], [12, 0]])
           expect(presenter.getState().content.scrollTop).toBe presenter.scrollHeight - presenter.clientHeight
+          expect(presenter.getRealScrollTop()).toBe presenter.scrollHeight - presenter.clientHeight
+          expect(didChangeScrollTopSpy).toHaveBeenCalledWith presenter.scrollHeight - presenter.clientHeight
 
           # Scroll top only gets smaller when needed as dimensions change, never bigger
           scrollTopBefore = presenter.getState().verticalScrollbar.scrollTop
+          didChangeScrollTopSpy.reset()
           expectStateUpdate presenter, -> editor.getBuffer().insert([9, Infinity], '\n\n\n')
           expect(presenter.getState().content.scrollTop).toBe scrollTopBefore
+          expect(presenter.getRealScrollTop()).toBe scrollTopBefore
+          expect(didChangeScrollTopSpy).not.toHaveBeenCalled()
 
         it "never goes negative", ->
           presenter = buildPresenter(scrollTop: 10, explicitHeight: 50, horizontalScrollbarHeight: 10)
@@ -548,30 +881,99 @@ describe "TextEditorPresenter", ->
           expect(presenter.getState().content.scrollTop).toBe presenter.contentHeight - presenter.clientHeight
 
       describe ".scrollLeft", ->
+        it "doesn't get stuck when repeatedly setting the same non-integer position in a scroll event listener", ->
+          presenter = buildPresenter(scrollLeft: 0, lineHeight: 10, baseCharacterWidth: 10, verticalScrollbarWidth: 10, contentFrameWidth: 10)
+          expect(presenter.getState().content.scrollLeft).toBe(0)
+
+          presenter.onDidChangeScrollLeft ->
+            presenter.setScrollLeft(1.5)
+            presenter.getState() # trigger scroll update
+
+          presenter.setScrollLeft(1.5)
+          presenter.getState() # trigger scroll update
+
+          expect(presenter.getScrollLeft()).toBe(2)
+          expect(presenter.getRealScrollLeft()).toBe(1.5)
+
+        it "changes based on the scroll operation that was performed last", ->
+          presenter = buildPresenter(scrollLeft: 0, lineHeight: 10, baseCharacterWidth: 10, verticalScrollbarWidth: 10, contentFrameWidth: 10)
+          expect(presenter.getState().content.scrollLeft).toBe(0)
+
+          presenter.setScrollLeft(20)
+          editor.setCursorBufferPosition([0, 9])
+
+          expect(presenter.getState().content.scrollLeft).toBe(90)
+
+          editor.setCursorBufferPosition([0, 18])
+          presenter.setScrollLeft(50)
+
+          expect(presenter.getState().content.scrollLeft).toBe(50)
+
+        it "corresponds to the passed logical coordinates when building the presenter", ->
+          editor.setFirstVisibleScreenColumn(3)
+          presenter = buildPresenter(lineHeight: 10, baseCharacterWidth: 10, verticalScrollbarWidth: 10, contentFrameWidth: 500)
+          expect(presenter.getState().content.scrollLeft).toBe(30)
+
         it "tracks the value of ::scrollLeft", ->
           presenter = buildPresenter(scrollLeft: 10, lineHeight: 10, baseCharacterWidth: 10, verticalScrollbarWidth: 10, contentFrameWidth: 500)
           expect(presenter.getState().content.scrollLeft).toBe 10
           expectStateUpdate presenter, -> presenter.setScrollLeft(50)
           expect(presenter.getState().content.scrollLeft).toBe 50
 
-        it "never exceeds the computed scrollWidth minus the computed clientWidth", ->
+        it "keeps the model up to date with the corresponding logical coordinates", ->
+          presenter = buildPresenter(scrollLeft: 0, lineHeight: 10, baseCharacterWidth: 10, verticalScrollbarWidth: 10, contentFrameWidth: 500)
+
+          expectStateUpdate presenter, -> presenter.setScrollLeft(50)
+          presenter.getState() # commits scroll position
+          expect(editor.getFirstVisibleScreenColumn()).toBe 5
+
+          expectStateUpdate presenter, -> presenter.setScrollLeft(57)
+          presenter.getState() # commits scroll position
+          expect(editor.getFirstVisibleScreenColumn()).toBe 6
+
+        it "is always rounded to the nearest integer", ->
           presenter = buildPresenter(scrollLeft: 10, lineHeight: 10, baseCharacterWidth: 10, verticalScrollbarWidth: 10, contentFrameWidth: 500)
+          expect(presenter.getState().content.scrollLeft).toBe 10
+          expectStateUpdate presenter, -> presenter.setScrollLeft(11.4)
+          expect(presenter.getState().content.scrollLeft).toBe 11
+          expectStateUpdate presenter, -> presenter.setScrollLeft(12.6)
+          expect(presenter.getState().content.scrollLeft).toBe 13
+
+        it "never exceeds the computed scrollWidth minus the computed clientWidth", ->
+          didChangeScrollLeftSpy = jasmine.createSpy()
+          presenter = buildPresenter(scrollLeft: 10, lineHeight: 10, baseCharacterWidth: 10, verticalScrollbarWidth: 10, contentFrameWidth: 500)
+          presenter.onDidChangeScrollLeft(didChangeScrollLeftSpy)
+
           expectStateUpdate presenter, -> presenter.setScrollLeft(300)
           expect(presenter.getState().content.scrollLeft).toBe presenter.scrollWidth - presenter.clientWidth
+          expect(presenter.getRealScrollLeft()).toBe presenter.scrollWidth - presenter.clientWidth
+          expect(didChangeScrollLeftSpy).toHaveBeenCalledWith presenter.scrollWidth - presenter.clientWidth
 
+          didChangeScrollLeftSpy.reset()
           expectStateUpdate presenter, -> presenter.setContentFrameWidth(600)
           expect(presenter.getState().content.scrollLeft).toBe presenter.scrollWidth - presenter.clientWidth
+          expect(presenter.getRealScrollLeft()).toBe presenter.scrollWidth - presenter.clientWidth
+          expect(didChangeScrollLeftSpy).toHaveBeenCalledWith presenter.scrollWidth - presenter.clientWidth
 
+          didChangeScrollLeftSpy.reset()
           expectStateUpdate presenter, -> presenter.setVerticalScrollbarWidth(5)
           expect(presenter.getState().content.scrollLeft).toBe presenter.scrollWidth - presenter.clientWidth
+          expect(presenter.getRealScrollLeft()).toBe presenter.scrollWidth - presenter.clientWidth
+          expect(didChangeScrollLeftSpy).toHaveBeenCalledWith presenter.scrollWidth - presenter.clientWidth
 
+          didChangeScrollLeftSpy.reset()
           expectStateUpdate presenter, -> editor.getBuffer().delete([[6, 0], [6, Infinity]])
           expect(presenter.getState().content.scrollLeft).toBe presenter.scrollWidth - presenter.clientWidth
+          expect(presenter.getRealScrollLeft()).toBe presenter.scrollWidth - presenter.clientWidth
+          expect(didChangeScrollLeftSpy).toHaveBeenCalledWith presenter.scrollWidth - presenter.clientWidth
 
           # Scroll top only gets smaller when needed as dimensions change, never bigger
           scrollLeftBefore = presenter.getState().content.scrollLeft
+          didChangeScrollLeftSpy.reset()
           expectStateUpdate presenter, -> editor.getBuffer().insert([6, 0], new Array(100).join('x'))
           expect(presenter.getState().content.scrollLeft).toBe scrollLeftBefore
+          expect(presenter.getRealScrollLeft()).toBe scrollLeftBefore
+          expect(didChangeScrollLeftSpy).not.toHaveBeenCalled()
 
         it "never goes negative", ->
           presenter = buildPresenter(scrollLeft: 10, verticalScrollbarWidth: 10, contentFrameWidth: 500)
@@ -627,20 +1029,25 @@ describe "TextEditorPresenter", ->
 
       describe ".backgroundColor", ->
         it "is assigned to ::backgroundColor unless the editor is mini", ->
-          presenter = buildPresenter(backgroundColor: 'rgba(255, 0, 0, 0)')
+          presenter = buildPresenter()
+          presenter.setBackgroundColor('rgba(255, 0, 0, 0)')
           expect(presenter.getState().content.backgroundColor).toBe 'rgba(255, 0, 0, 0)'
+
           editor.setMini(true)
-          presenter = buildPresenter(backgroundColor: 'rgba(255, 0, 0, 0)')
+          presenter = buildPresenter()
+          presenter.setBackgroundColor('rgba(255, 0, 0, 0)')
           expect(presenter.getState().content.backgroundColor).toBeNull()
 
         it "updates when ::backgroundColor changes", ->
-          presenter = buildPresenter(backgroundColor: 'rgba(255, 0, 0, 0)')
+          presenter = buildPresenter()
+          presenter.setBackgroundColor('rgba(255, 0, 0, 0)')
           expect(presenter.getState().content.backgroundColor).toBe 'rgba(255, 0, 0, 0)'
           expectStateUpdate presenter, -> presenter.setBackgroundColor('rgba(0, 0, 255, 0)')
           expect(presenter.getState().content.backgroundColor).toBe 'rgba(0, 0, 255, 0)'
 
         it "updates when ::mini changes", ->
-          presenter = buildPresenter(backgroundColor: 'rgba(255, 0, 0, 0)')
+          presenter = buildPresenter()
+          presenter.setBackgroundColor('rgba(255, 0, 0, 0)')
           expect(presenter.getState().content.backgroundColor).toBe 'rgba(255, 0, 0, 0)'
           expectStateUpdate presenter, -> editor.setMini(true)
           expect(presenter.getState().content.backgroundColor).toBeNull()
@@ -657,228 +1064,112 @@ describe "TextEditorPresenter", ->
           expectStateUpdate presenter, -> editor.setPlaceholderText("new-placeholder-text")
           expect(presenter.getState().content.placeholderText).toBe "new-placeholder-text"
 
-      describe ".lines", ->
-        lineStateForScreenRow = (presenter, screenRow) ->
-          presenter.getState().content.lines[presenter.model.tokenizedLineForScreenRow(screenRow).id]
+      describe ".tiles", ->
+        lineStateForScreenRow = (presenter, row) ->
+          lineId  = presenter.model.tokenizedLineForScreenRow(row).id
+          tileRow = presenter.tileForRow(row)
+          presenter.getState().content.tiles[tileRow]?.lines[lineId]
 
-        it "contains states for lines that are visible on screen, plus and minus the overdraw margin", ->
-          presenter = buildPresenter(explicitHeight: 15, scrollTop: 50, lineHeight: 10, lineOverdrawMargin: 1)
+        tiledContentContract (presenter) -> presenter.getState().content
 
-          expect(lineStateForScreenRow(presenter, 3)).toBeUndefined()
+        describe "[tileId].lines[lineId]", -> # line state objects
+          it "includes the state for visible lines in a tile", ->
+            presenter = buildPresenter(explicitHeight: 3, scrollTop: 4, lineHeight: 1, tileSize: 3, stoppedScrollingDelay: 200)
+            presenter.setExplicitHeight(3)
 
-          line4 = editor.tokenizedLineForScreenRow(4)
-          expectValues lineStateForScreenRow(presenter, 4), {
-            screenRow: 4
-            text: line4.text
-            tags: line4.tags
-            specialTokens: line4.specialTokens
-            firstNonWhitespaceIndex: line4.firstNonWhitespaceIndex
-            firstTrailingWhitespaceIndex: line4.firstTrailingWhitespaceIndex
-            invisibles: line4.invisibles
-            top: 10 * 4
-          }
+            expect(lineStateForScreenRow(presenter, 2)).toBeUndefined()
 
-          line5 = editor.tokenizedLineForScreenRow(5)
-          expectValues lineStateForScreenRow(presenter, 5), {
-            screenRow: 5
-            text: line5.text
-            tags: line5.tags
-            specialTokens: line5.specialTokens
-            firstNonWhitespaceIndex: line5.firstNonWhitespaceIndex
-            firstTrailingWhitespaceIndex: line5.firstTrailingWhitespaceIndex
-            invisibles: line5.invisibles
-            top: 10 * 5
-          }
+            line3 = editor.tokenizedLineForScreenRow(3)
+            expectValues lineStateForScreenRow(presenter, 3), {
+              screenRow: 3
+              text: line3.text
+              tags: line3.tags
+              specialTokens: line3.specialTokens
+              firstNonWhitespaceIndex: line3.firstNonWhitespaceIndex
+              firstTrailingWhitespaceIndex: line3.firstTrailingWhitespaceIndex
+              invisibles: line3.invisibles
+            }
 
-          line6 = editor.tokenizedLineForScreenRow(6)
-          expectValues lineStateForScreenRow(presenter, 6), {
-            screenRow: 6
-            text: line6.text
-            tags: line6.tags
-            specialTokens: line6.specialTokens
-            firstNonWhitespaceIndex: line6.firstNonWhitespaceIndex
-            firstTrailingWhitespaceIndex: line6.firstTrailingWhitespaceIndex
-            invisibles: line6.invisibles
-            top: 10 * 6
-          }
+            line4 = editor.tokenizedLineForScreenRow(4)
+            expectValues lineStateForScreenRow(presenter, 4), {
+              screenRow: 4
+              text: line4.text
+              tags: line4.tags
+              specialTokens: line4.specialTokens
+              firstNonWhitespaceIndex: line4.firstNonWhitespaceIndex
+              firstTrailingWhitespaceIndex: line4.firstTrailingWhitespaceIndex
+              invisibles: line4.invisibles
+            }
 
-          line7 = editor.tokenizedLineForScreenRow(7)
-          expectValues lineStateForScreenRow(presenter, 7), {
-            screenRow: 7
-            text: line7.text
-            tags: line7.tags
-            specialTokens: line7.specialTokens
-            firstNonWhitespaceIndex: line7.firstNonWhitespaceIndex
-            firstTrailingWhitespaceIndex: line7.firstTrailingWhitespaceIndex
-            invisibles: line7.invisibles
-            top: 10 * 7
-          }
+            line5 = editor.tokenizedLineForScreenRow(5)
+            expectValues lineStateForScreenRow(presenter, 5), {
+              screenRow: 5
+              text: line5.text
+              tags: line5.tags
+              specialTokens: line5.specialTokens
+              firstNonWhitespaceIndex: line5.firstNonWhitespaceIndex
+              firstTrailingWhitespaceIndex: line5.firstTrailingWhitespaceIndex
+              invisibles: line5.invisibles
+            }
 
-          line8 = editor.tokenizedLineForScreenRow(8)
-          expectValues lineStateForScreenRow(presenter, 8), {
-            screenRow: 8
-            text: line8.text
-            tags: line8.tags
-            specialTokens: line8.specialTokens
-            firstNonWhitespaceIndex: line8.firstNonWhitespaceIndex
-            firstTrailingWhitespaceIndex: line8.firstTrailingWhitespaceIndex
-            invisibles: line8.invisibles
-            top: 10 * 8
-          }
+            line6 = editor.tokenizedLineForScreenRow(6)
+            expectValues lineStateForScreenRow(presenter, 6), {
+              screenRow: 6
+              text: line6.text
+              tags: line6.tags
+              specialTokens: line6.specialTokens
+              firstNonWhitespaceIndex: line6.firstNonWhitespaceIndex
+              firstTrailingWhitespaceIndex: line6.firstTrailingWhitespaceIndex
+              invisibles: line6.invisibles
+            }
 
-          expect(lineStateForScreenRow(presenter, 9)).toBeUndefined()
+            line7 = editor.tokenizedLineForScreenRow(7)
+            expectValues lineStateForScreenRow(presenter, 7), {
+              screenRow: 7
+              text: line7.text
+              tags: line7.tags
+              specialTokens: line7.specialTokens
+              firstNonWhitespaceIndex: line7.firstNonWhitespaceIndex
+              firstTrailingWhitespaceIndex: line7.firstTrailingWhitespaceIndex
+              invisibles: line7.invisibles
+            }
 
-        it "does not overdraw above the first row", ->
-          presenter = buildPresenter(explicitHeight: 15, scrollTop: 10, lineHeight: 10, lineOverdrawMargin: 2)
-          expect(lineStateForScreenRow(presenter, 0)).toBeDefined()
-          expect(lineStateForScreenRow(presenter, 1)).toBeDefined()
-          expect(lineStateForScreenRow(presenter, 2)).toBeDefined()
-          expect(lineStateForScreenRow(presenter, 3)).toBeDefined()
-          expect(lineStateForScreenRow(presenter, 4)).toBeDefined()
-          expect(lineStateForScreenRow(presenter, 5)).toBeDefined()
-          expect(lineStateForScreenRow(presenter, 6)).toBeUndefined()
+            line8 = editor.tokenizedLineForScreenRow(8)
+            expectValues lineStateForScreenRow(presenter, 8), {
+              screenRow: 8
+              text: line8.text
+              tags: line8.tags
+              specialTokens: line8.specialTokens
+              firstNonWhitespaceIndex: line8.firstNonWhitespaceIndex
+              firstTrailingWhitespaceIndex: line8.firstTrailingWhitespaceIndex
+              invisibles: line8.invisibles
+            }
 
-        it "does not overdraw below the last row", ->
-          presenter = buildPresenter(explicitHeight: 25, scrollTop: 105, lineHeight: 10, lineOverdrawMargin: 2)
-          expect(lineStateForScreenRow(presenter, 7)).toBeUndefined()
-          expect(lineStateForScreenRow(presenter, 8)).toBeDefined()
-          expect(lineStateForScreenRow(presenter, 9)).toBeDefined()
-          expect(lineStateForScreenRow(presenter, 10)).toBeDefined()
-          expect(lineStateForScreenRow(presenter, 11)).toBeDefined()
-          expect(lineStateForScreenRow(presenter, 12)).toBeDefined()
+            expect(lineStateForScreenRow(presenter, 9)).toBeUndefined()
 
-        it "includes state for all lines if no external ::explicitHeight is assigned", ->
-          presenter = buildPresenter(explicitHeight: null)
-          expect(lineStateForScreenRow(presenter, 0)).toBeDefined()
-          expect(lineStateForScreenRow(presenter, 12)).toBeDefined()
+          it "updates when the editor's content changes", ->
+            presenter = buildPresenter(explicitHeight: 25, scrollTop: 10, lineHeight: 10, tileSize: 2)
 
-        it "is empty until all of the required measurements are assigned", ->
-          presenter = buildPresenter(explicitHeight: null, lineHeight: null, scrollTop: null)
-          expect(presenter.getState().content.lines).toEqual({})
+            expectStateUpdate presenter, -> buffer.insert([2, 0], "hello\nworld\n")
 
-          presenter.setExplicitHeight(25)
-          expect(presenter.getState().content.lines).toEqual({})
+            line1 = editor.tokenizedLineForScreenRow(1)
+            expectValues lineStateForScreenRow(presenter, 1), {
+              text: line1.text
+              tags: line1.tags
+            }
 
-          presenter.setLineHeight(10)
-          expect(presenter.getState().content.lines).toEqual({})
+            line2 = editor.tokenizedLineForScreenRow(2)
+            expectValues lineStateForScreenRow(presenter, 2), {
+              text: line2.text
+              tags: line2.tags
+            }
 
-          presenter.setScrollTop(0)
-          expect(presenter.getState().content.lines).not.toEqual({})
+            line3 = editor.tokenizedLineForScreenRow(3)
+            expectValues lineStateForScreenRow(presenter, 3), {
+              text: line3.text
+              tags: line3.tags
+            }
 
-        it "updates when ::scrollTop changes", ->
-          presenter = buildPresenter(explicitHeight: 25, scrollTop: 0, lineHeight: 10, lineOverdrawMargin: 1)
-
-          expect(lineStateForScreenRow(presenter, 0)).toBeDefined()
-          expect(lineStateForScreenRow(presenter, 4)).toBeDefined()
-          expect(lineStateForScreenRow(presenter, 5)).toBeUndefined()
-
-          expectStateUpdate presenter, -> presenter.setScrollTop(25)
-
-          expect(lineStateForScreenRow(presenter, 0)).toBeUndefined()
-          expect(lineStateForScreenRow(presenter, 1)).toBeDefined()
-          expect(lineStateForScreenRow(presenter, 6)).toBeDefined()
-          expect(lineStateForScreenRow(presenter, 7)).toBeUndefined()
-
-        it "updates when ::explicitHeight changes", ->
-          presenter = buildPresenter(explicitHeight: 15, scrollTop: 15, lineHeight: 10, lineOverdrawMargin: 1)
-
-          line5 = editor.tokenizedLineForScreenRow(5)
-
-          expect(lineStateForScreenRow(presenter, 4)).toBeDefined()
-          expect(lineStateForScreenRow(presenter, 5)).toBeUndefined()
-
-          expectStateUpdate presenter, -> presenter.setExplicitHeight(35)
-
-          expect(lineStateForScreenRow(presenter, 5)).toBeDefined()
-          expect(lineStateForScreenRow(presenter, 6)).toBeDefined()
-          expect(lineStateForScreenRow(presenter, 7)).toBeUndefined()
-
-        it "updates when ::lineHeight changes", ->
-          presenter = buildPresenter(explicitHeight: 15, scrollTop: 10, lineHeight: 10, lineOverdrawMargin: 0)
-
-          expect(lineStateForScreenRow(presenter, 0)).toBeUndefined()
-          expect(lineStateForScreenRow(presenter, 1)).toBeDefined()
-          expect(lineStateForScreenRow(presenter, 2)).toBeDefined()
-          expect(lineStateForScreenRow(presenter, 4)).toBeUndefined()
-
-          expectStateUpdate presenter, -> presenter.setLineHeight(5)
-
-          expect(lineStateForScreenRow(presenter, 0)).toBeUndefined()
-          expect(lineStateForScreenRow(presenter, 1)).toBeUndefined()
-          expect(lineStateForScreenRow(presenter, 2)).toBeDefined()
-          expect(lineStateForScreenRow(presenter, 5)).toBeDefined()
-          expect(lineStateForScreenRow(presenter, 6)).toBeUndefined()
-
-        it "updates when the editor's content changes", ->
-          presenter = buildPresenter(explicitHeight: 25, scrollTop: 10, lineHeight: 10)
-
-          expectStateUpdate presenter, -> buffer.insert([2, 0], "hello\nworld\n")
-
-          line1 = editor.tokenizedLineForScreenRow(1)
-          expectValues lineStateForScreenRow(presenter, 1), {
-            text: line1.text
-            tags: line1.tags
-          }
-
-          line2 = editor.tokenizedLineForScreenRow(2)
-          expectValues lineStateForScreenRow(presenter, 2), {
-            text: line2.text
-            tags: line2.tags
-          }
-
-          line3 = editor.tokenizedLineForScreenRow(3)
-          expectValues lineStateForScreenRow(presenter, 3), {
-            text: line3.text
-            tags: line3.tags
-          }
-
-        it "does not remove out-of-view lines corresponding to ::mouseWheelScreenRow until ::stoppedScrollingDelay elapses", ->
-          presenter = buildPresenter(explicitHeight: 25, scrollTop: 0, lineHeight: 10, lineOverdrawMargin: 1, stoppedScrollingDelay: 200)
-
-          expect(lineStateForScreenRow(presenter, 0)).toBeDefined()
-          expect(lineStateForScreenRow(presenter, 4)).toBeDefined()
-          expect(lineStateForScreenRow(presenter, 5)).toBeUndefined()
-
-          presenter.setMouseWheelScreenRow(0)
-          expectStateUpdate presenter, -> presenter.setScrollTop(35)
-
-          expect(lineStateForScreenRow(presenter, 0)).toBeDefined()
-          expect(lineStateForScreenRow(presenter, 1)).toBeUndefined()
-          expect(lineStateForScreenRow(presenter, 7)).toBeDefined()
-          expect(lineStateForScreenRow(presenter, 8)).toBeUndefined()
-
-          expectStateUpdate presenter, -> advanceClock(200)
-
-          expect(lineStateForScreenRow(presenter, 0)).toBeUndefined()
-          expect(lineStateForScreenRow(presenter, 1)).toBeUndefined()
-          expect(lineStateForScreenRow(presenter, 2)).toBeDefined()
-          expect(lineStateForScreenRow(presenter, 7)).toBeDefined()
-          expect(lineStateForScreenRow(presenter, 8)).toBeUndefined()
-
-          # should clear ::mouseWheelScreenRow after stoppedScrollingDelay elapses even if we don't scroll first
-          presenter.setMouseWheelScreenRow(2)
-          advanceClock(200)
-          expectStateUpdate presenter, -> presenter.setScrollTop(45)
-          expect(lineStateForScreenRow(presenter, 2)).toBeUndefined()
-
-        it "does not preserve on-screen lines even if they correspond to ::mouseWheelScreenRow", ->
-          presenter = buildPresenter(explicitHeight: 25, scrollTop: 0, lineHeight: 10, lineOverdrawMargin: 1, stoppedScrollingDelay: 200)
-          oldLine3 = editor.tokenizedLineForScreenRow(6)
-
-          presenter.setMouseWheelScreenRow(3)
-
-          expectStateUpdate presenter, -> editor.getBuffer().insert([3, Infinity], 'xyz')
-          newLine3 = editor.tokenizedLineForScreenRow(3)
-
-          expect(presenter.getState().content.lines[oldLine3.id]).toBeUndefined()
-          expect(presenter.getState().content.lines[newLine3.id]).toBeDefined()
-
-        it "does not attempt to preserve lines corresponding to ::mouseWheelScreenRow if they have been deleted", ->
-          presenter = buildPresenter(explicitHeight: 25, scrollTop: 0, lineHeight: 10, lineOverdrawMargin: 1, stoppedScrollingDelay: 200)
-          presenter.setMouseWheelScreenRow(10)
-          editor.setText('')
-
-        describe "[lineId]", -> # line state objects
           it "includes the .endOfLineInvisibles if the editor.showInvisibles config option is true", ->
             editor.setText("hello\nworld\r\n")
             presenter = buildPresenter(explicitHeight: 25, scrollTop: 0, lineHeight: 10)
@@ -892,55 +1183,62 @@ describe "TextEditorPresenter", ->
 
           describe ".decorationClasses", ->
             it "adds decoration classes to the relevant line state objects, both initially and when decorations change", ->
-              marker1 = editor.markBufferRange([[4, 0], [6, 2]], invalidate: 'touch')
+              marker1 = editor.addMarkerLayer(maintainHistory: true).markBufferRange([[4, 0], [6, 2]], invalidate: 'touch')
               decoration1 = editor.decorateMarker(marker1, type: 'line', class: 'a')
               presenter = buildPresenter()
-              marker2 = editor.markBufferRange([[4, 0], [6, 2]], invalidate: 'touch')
+              marker2 = editor.addMarkerLayer(maintainHistory: true).markBufferRange([[4, 0], [6, 2]], invalidate: 'touch')
               decoration2 = editor.decorateMarker(marker2, type: 'line', class: 'b')
 
-              expect(lineStateForScreenRow(presenter, 3).decorationClasses).toBeNull()
-              expect(lineStateForScreenRow(presenter, 4).decorationClasses).toEqual ['a', 'b']
-              expect(lineStateForScreenRow(presenter, 5).decorationClasses).toEqual ['a', 'b']
-              expect(lineStateForScreenRow(presenter, 6).decorationClasses).toEqual ['a', 'b']
-              expect(lineStateForScreenRow(presenter, 7).decorationClasses).toBeNull()
+              waitsForStateToUpdate presenter
+              runs ->
+                expect(lineStateForScreenRow(presenter, 3).decorationClasses).toBeNull()
+                expect(lineStateForScreenRow(presenter, 4).decorationClasses).toEqual ['a', 'b']
+                expect(lineStateForScreenRow(presenter, 5).decorationClasses).toEqual ['a', 'b']
+                expect(lineStateForScreenRow(presenter, 6).decorationClasses).toEqual ['a', 'b']
+                expect(lineStateForScreenRow(presenter, 7).decorationClasses).toBeNull()
 
-              expectStateUpdate presenter, -> editor.getBuffer().insert([5, 0], 'x')
-              expect(marker1.isValid()).toBe false
-              expect(lineStateForScreenRow(presenter, 4).decorationClasses).toBeNull()
-              expect(lineStateForScreenRow(presenter, 5).decorationClasses).toBeNull()
-              expect(lineStateForScreenRow(presenter, 6).decorationClasses).toBeNull()
+              waitsForStateToUpdate presenter, -> editor.getBuffer().insert([5, 0], 'x')
+              runs ->
+                expect(marker1.isValid()).toBe false
+                expect(lineStateForScreenRow(presenter, 4).decorationClasses).toBeNull()
+                expect(lineStateForScreenRow(presenter, 5).decorationClasses).toBeNull()
+                expect(lineStateForScreenRow(presenter, 6).decorationClasses).toBeNull()
 
-              expectStateUpdate presenter, -> editor.undo()
-              expect(lineStateForScreenRow(presenter, 3).decorationClasses).toBeNull()
-              expect(lineStateForScreenRow(presenter, 4).decorationClasses).toEqual ['a', 'b']
-              expect(lineStateForScreenRow(presenter, 5).decorationClasses).toEqual ['a', 'b']
-              expect(lineStateForScreenRow(presenter, 6).decorationClasses).toEqual ['a', 'b']
-              expect(lineStateForScreenRow(presenter, 7).decorationClasses).toBeNull()
+              waitsForStateToUpdate presenter, -> editor.undo()
+              runs ->
+                expect(lineStateForScreenRow(presenter, 3).decorationClasses).toBeNull()
+                expect(lineStateForScreenRow(presenter, 4).decorationClasses).toEqual ['a', 'b']
+                expect(lineStateForScreenRow(presenter, 5).decorationClasses).toEqual ['a', 'b']
+                expect(lineStateForScreenRow(presenter, 6).decorationClasses).toEqual ['a', 'b']
+                expect(lineStateForScreenRow(presenter, 7).decorationClasses).toBeNull()
 
-              expectStateUpdate presenter, -> marker1.setBufferRange([[2, 0], [4, 2]])
-              expect(lineStateForScreenRow(presenter, 1).decorationClasses).toBeNull()
-              expect(lineStateForScreenRow(presenter, 2).decorationClasses).toEqual ['a']
-              expect(lineStateForScreenRow(presenter, 3).decorationClasses).toEqual ['a']
-              expect(lineStateForScreenRow(presenter, 4).decorationClasses).toEqual ['a', 'b']
-              expect(lineStateForScreenRow(presenter, 5).decorationClasses).toEqual ['b']
-              expect(lineStateForScreenRow(presenter, 6).decorationClasses).toEqual ['b']
-              expect(lineStateForScreenRow(presenter, 7).decorationClasses).toBeNull()
+              waitsForStateToUpdate presenter, -> marker1.setBufferRange([[2, 0], [4, 2]])
+              runs ->
+                expect(lineStateForScreenRow(presenter, 1).decorationClasses).toBeNull()
+                expect(lineStateForScreenRow(presenter, 2).decorationClasses).toEqual ['a']
+                expect(lineStateForScreenRow(presenter, 3).decorationClasses).toEqual ['a']
+                expect(lineStateForScreenRow(presenter, 4).decorationClasses).toEqual ['a', 'b']
+                expect(lineStateForScreenRow(presenter, 5).decorationClasses).toEqual ['b']
+                expect(lineStateForScreenRow(presenter, 6).decorationClasses).toEqual ['b']
+                expect(lineStateForScreenRow(presenter, 7).decorationClasses).toBeNull()
 
-              expectStateUpdate presenter, -> decoration1.destroy()
-              expect(lineStateForScreenRow(presenter, 2).decorationClasses).toBeNull()
-              expect(lineStateForScreenRow(presenter, 3).decorationClasses).toBeNull()
-              expect(lineStateForScreenRow(presenter, 4).decorationClasses).toEqual ['b']
-              expect(lineStateForScreenRow(presenter, 5).decorationClasses).toEqual ['b']
-              expect(lineStateForScreenRow(presenter, 6).decorationClasses).toEqual ['b']
-              expect(lineStateForScreenRow(presenter, 7).decorationClasses).toBeNull()
+              waitsForStateToUpdate presenter, -> decoration1.destroy()
+              runs ->
+                expect(lineStateForScreenRow(presenter, 2).decorationClasses).toBeNull()
+                expect(lineStateForScreenRow(presenter, 3).decorationClasses).toBeNull()
+                expect(lineStateForScreenRow(presenter, 4).decorationClasses).toEqual ['b']
+                expect(lineStateForScreenRow(presenter, 5).decorationClasses).toEqual ['b']
+                expect(lineStateForScreenRow(presenter, 6).decorationClasses).toEqual ['b']
+                expect(lineStateForScreenRow(presenter, 7).decorationClasses).toBeNull()
 
-              expectStateUpdate presenter, -> marker2.destroy()
-              expect(lineStateForScreenRow(presenter, 2).decorationClasses).toBeNull()
-              expect(lineStateForScreenRow(presenter, 3).decorationClasses).toBeNull()
-              expect(lineStateForScreenRow(presenter, 4).decorationClasses).toBeNull()
-              expect(lineStateForScreenRow(presenter, 5).decorationClasses).toBeNull()
-              expect(lineStateForScreenRow(presenter, 6).decorationClasses).toBeNull()
-              expect(lineStateForScreenRow(presenter, 7).decorationClasses).toBeNull()
+              waitsForStateToUpdate presenter, -> marker2.destroy()
+              runs ->
+                expect(lineStateForScreenRow(presenter, 2).decorationClasses).toBeNull()
+                expect(lineStateForScreenRow(presenter, 3).decorationClasses).toBeNull()
+                expect(lineStateForScreenRow(presenter, 4).decorationClasses).toBeNull()
+                expect(lineStateForScreenRow(presenter, 5).decorationClasses).toBeNull()
+                expect(lineStateForScreenRow(presenter, 6).decorationClasses).toBeNull()
+                expect(lineStateForScreenRow(presenter, 7).decorationClasses).toBeNull()
 
             it "honors the 'onlyEmpty' option on line decorations", ->
               presenter = buildPresenter()
@@ -951,11 +1249,12 @@ describe "TextEditorPresenter", ->
               expect(lineStateForScreenRow(presenter, 5).decorationClasses).toBeNull()
               expect(lineStateForScreenRow(presenter, 6).decorationClasses).toBeNull()
 
-              expectStateUpdate presenter, -> marker.clearTail()
+              waitsForStateToUpdate presenter, -> marker.clearTail()
 
-              expect(lineStateForScreenRow(presenter, 4).decorationClasses).toBeNull()
-              expect(lineStateForScreenRow(presenter, 5).decorationClasses).toBeNull()
-              expect(lineStateForScreenRow(presenter, 6).decorationClasses).toEqual ['a']
+              runs ->
+                expect(lineStateForScreenRow(presenter, 4).decorationClasses).toBeNull()
+                expect(lineStateForScreenRow(presenter, 5).decorationClasses).toBeNull()
+                expect(lineStateForScreenRow(presenter, 6).decorationClasses).toEqual ['a']
 
             it "honors the 'onlyNonEmpty' option on line decorations", ->
               presenter = buildPresenter()
@@ -966,44 +1265,54 @@ describe "TextEditorPresenter", ->
               expect(lineStateForScreenRow(presenter, 5).decorationClasses).toEqual ['a']
               expect(lineStateForScreenRow(presenter, 6).decorationClasses).toEqual ['a']
 
-              expectStateUpdate presenter, -> marker.clearTail()
+              waitsForStateToUpdate presenter, -> marker.clearTail()
 
-              expect(lineStateForScreenRow(presenter, 6).decorationClasses).toBeNull()
+              runs ->
+                expect(lineStateForScreenRow(presenter, 6).decorationClasses).toBeNull()
 
             it "honors the 'onlyHead' option on line decorations", ->
               presenter = buildPresenter()
-              marker = editor.markBufferRange([[4, 0], [6, 2]])
-              decoration = editor.decorateMarker(marker, type: 'line', class: 'a', onlyHead: true)
+              waitsForStateToUpdate presenter, ->
+                marker = editor.markBufferRange([[4, 0], [6, 2]])
+                editor.decorateMarker(marker, type: 'line', class: 'a', onlyHead: true)
 
-              expect(lineStateForScreenRow(presenter, 4).decorationClasses).toBeNull()
-              expect(lineStateForScreenRow(presenter, 5).decorationClasses).toBeNull()
-              expect(lineStateForScreenRow(presenter, 6).decorationClasses).toEqual ['a']
+              runs ->
+                expect(lineStateForScreenRow(presenter, 4).decorationClasses).toBeNull()
+                expect(lineStateForScreenRow(presenter, 5).decorationClasses).toBeNull()
+                expect(lineStateForScreenRow(presenter, 6).decorationClasses).toEqual ['a']
 
             it "does not decorate the last line of a non-empty line decoration range if it ends at column 0", ->
               presenter = buildPresenter()
-              marker = editor.markBufferRange([[4, 0], [6, 0]])
-              decoration = editor.decorateMarker(marker, type: 'line', class: 'a')
+              waitsForStateToUpdate presenter, ->
+                marker = editor.markBufferRange([[4, 0], [6, 0]])
+                editor.decorateMarker(marker, type: 'line', class: 'a')
 
-              expect(lineStateForScreenRow(presenter, 4).decorationClasses).toEqual ['a']
-              expect(lineStateForScreenRow(presenter, 5).decorationClasses).toEqual ['a']
-              expect(lineStateForScreenRow(presenter, 6).decorationClasses).toBeNull()
+              runs ->
+                expect(lineStateForScreenRow(presenter, 4).decorationClasses).toEqual ['a']
+                expect(lineStateForScreenRow(presenter, 5).decorationClasses).toEqual ['a']
+                expect(lineStateForScreenRow(presenter, 6).decorationClasses).toBeNull()
 
             it "does not apply line decorations to mini editors", ->
               editor.setMini(true)
               presenter = buildPresenter(explicitHeight: 10)
-              marker = editor.markBufferRange([[0, 0], [0, 0]])
-              decoration = editor.decorateMarker(marker, type: 'line', class: 'a')
-              expect(lineStateForScreenRow(presenter, 0).decorationClasses).toBeNull()
 
-              expectStateUpdate presenter, -> editor.setMini(false)
-              expect(lineStateForScreenRow(presenter, 0).decorationClasses).toEqual ['cursor-line', 'a']
+              waitsForStateToUpdate presenter, ->
+                marker = editor.markBufferRange([[0, 0], [0, 0]])
+                decoration = editor.decorateMarker(marker, type: 'line', class: 'a')
 
-              expectStateUpdate presenter, -> editor.setMini(true)
-              expect(lineStateForScreenRow(presenter, 0).decorationClasses).toBeNull()
+              runs ->
+                expect(lineStateForScreenRow(presenter, 0).decorationClasses).toBeNull()
+
+                expectStateUpdate presenter, -> editor.setMini(false)
+                expect(lineStateForScreenRow(presenter, 0).decorationClasses).toEqual ['cursor-line', 'a']
+
+                expectStateUpdate presenter, -> editor.setMini(true)
+                expect(lineStateForScreenRow(presenter, 0).decorationClasses).toBeNull()
 
             it "only applies decorations to screen rows that are spanned by their marker when lines are soft-wrapped", ->
               editor.setText("a line that wraps, ok")
               editor.setSoftWrapped(true)
+              editor.setDefaultCharWidth(1)
               editor.setEditorWidthInChars(16)
               marker = editor.markBufferRange([[0, 0], [0, 2]])
               editor.decorateMarker(marker, type: 'line', class: 'a')
@@ -1012,9 +1321,12 @@ describe "TextEditorPresenter", ->
               expect(lineStateForScreenRow(presenter, 0).decorationClasses).toContain 'a'
               expect(lineStateForScreenRow(presenter, 1).decorationClasses).toBeNull()
 
-              marker.setBufferRange([[0, 0], [0, Infinity]])
-              expect(lineStateForScreenRow(presenter, 0).decorationClasses).toContain 'a'
-              expect(lineStateForScreenRow(presenter, 1).decorationClasses).toContain 'a'
+              waitsForStateToUpdate presenter, ->
+                marker.setBufferRange([[0, 0], [0, Infinity]])
+
+              runs ->
+                expect(lineStateForScreenRow(presenter, 0).decorationClasses).toContain 'a'
+                expect(lineStateForScreenRow(presenter, 1).decorationClasses).toContain 'a'
 
       describe ".cursors", ->
         stateForCursor = (presenter, cursorIndex) ->
@@ -1031,13 +1343,13 @@ describe "TextEditorPresenter", ->
           presenter = buildPresenter(explicitHeight: 30, scrollTop: 20)
 
           expect(stateForCursor(presenter, 0)).toBeUndefined()
-          expect(stateForCursor(presenter, 1)).toEqual {top: 2 * 10, left: 4 * 10, width: 10, height: 10}
+          expect(stateForCursor(presenter, 1)).toEqual {top: 0, left: 4 * 10, width: 10, height: 10}
           expect(stateForCursor(presenter, 2)).toBeUndefined()
-          expect(stateForCursor(presenter, 3)).toEqual {top: 5 * 10, left: 12 * 10, width: 10, height: 10}
+          expect(stateForCursor(presenter, 3)).toEqual {top: 5 * 10 - 20, left: 12 * 10, width: 10, height: 10}
           expect(stateForCursor(presenter, 4)).toBeUndefined()
 
         it "is empty until all of the required measurements are assigned", ->
-          presenter = buildPresenter(explicitHeight: null, lineHeight: null, scrollTop: null, baseCharacterWidth: null, horizontalScrollbarHeight: null)
+          presenter = buildPresenterWithoutMeasurements()
           expect(presenter.getState().content.cursors).toEqual({})
 
           presenter.setExplicitHeight(25)
@@ -1050,6 +1362,15 @@ describe "TextEditorPresenter", ->
           expect(presenter.getState().content.cursors).toEqual({})
 
           presenter.setBaseCharacterWidth(8)
+          expect(presenter.getState().content.cursors).toEqual({})
+
+          presenter.setBoundingClientRect(top: 0, left: 0, width: 500, height: 130)
+          expect(presenter.getState().content.cursors).toEqual({})
+
+          presenter.setWindowSize(500, 130)
+          expect(presenter.getState().content.cursors).toEqual({})
+
+          presenter.setVerticalScrollbarWidth(10)
           expect(presenter.getState().content.cursors).toEqual({})
 
           presenter.setHorizontalScrollbarHeight(10)
@@ -1069,8 +1390,21 @@ describe "TextEditorPresenter", ->
           expect(stateForCursor(presenter, 0)).toBeUndefined()
           expect(stateForCursor(presenter, 1)).toBeUndefined()
           expect(stateForCursor(presenter, 2)).toBeUndefined()
-          expect(stateForCursor(presenter, 3)).toEqual {top: 5 * 10, left: 12 * 10, width: 10, height: 10}
-          expect(stateForCursor(presenter, 4)).toEqual {top: 8 * 10, left: 4 * 10, width: 10, height: 10}
+          expect(stateForCursor(presenter, 3)).toEqual {top: 0, left: 12 * 10, width: 10, height: 10}
+          expect(stateForCursor(presenter, 4)).toEqual {top: 8 * 10 - 50, left: 4 * 10, width: 10, height: 10}
+
+        it "updates when ::scrollTop changes after the model was changed", ->
+          editor.setCursorBufferPosition([8, 22])
+          presenter = buildPresenter(explicitHeight: 50, scrollTop: 10 * 8)
+
+          expect(stateForCursor(presenter, 0)).toEqual {top: 0, left: 10 * 22, width: 10, height: 10}
+
+          expectStateUpdate presenter, ->
+            editor.getBuffer().deleteRow(12)
+            editor.getBuffer().deleteRow(11)
+            editor.getBuffer().deleteRow(10)
+
+          expect(stateForCursor(presenter, 0)).toEqual {top: 20, left: 10 * 22, width: 10, height: 10}
 
         it "updates when ::explicitHeight changes", ->
           editor.setSelectedBufferRanges([
@@ -1084,9 +1418,9 @@ describe "TextEditorPresenter", ->
 
           expectStateUpdate presenter, -> presenter.setExplicitHeight(30)
           expect(stateForCursor(presenter, 0)).toBeUndefined()
-          expect(stateForCursor(presenter, 1)).toEqual {top: 2 * 10, left: 4 * 10, width: 10, height: 10}
+          expect(stateForCursor(presenter, 1)).toEqual {top: 0, left: 4 * 10, width: 10, height: 10}
           expect(stateForCursor(presenter, 2)).toBeUndefined()
-          expect(stateForCursor(presenter, 3)).toEqual {top: 5 * 10, left: 12 * 10, width: 10, height: 10}
+          expect(stateForCursor(presenter, 3)).toEqual {top: 5 * 10 - 20, left: 12 * 10, width: 10, height: 10}
           expect(stateForCursor(presenter, 4)).toBeUndefined()
 
         it "updates when ::lineHeight changes", ->
@@ -1103,15 +1437,8 @@ describe "TextEditorPresenter", ->
           expect(stateForCursor(presenter, 0)).toBeUndefined()
           expect(stateForCursor(presenter, 1)).toBeUndefined()
           expect(stateForCursor(presenter, 2)).toBeUndefined()
-          expect(stateForCursor(presenter, 3)).toEqual {top: 5 * 5, left: 12 * 10, width: 10, height: 5}
-          expect(stateForCursor(presenter, 4)).toEqual {top: 8 * 5, left: 4 * 10, width: 10, height: 5}
-
-        it "updates when ::baseCharacterWidth changes", ->
-          editor.setCursorBufferPosition([2, 4])
-          presenter = buildPresenter(explicitHeight: 20, scrollTop: 20)
-
-          expectStateUpdate presenter, -> presenter.setBaseCharacterWidth(20)
-          expect(stateForCursor(presenter, 0)).toEqual {top: 2 * 10, left: 4 * 20, width: 20, height: 10}
+          expect(stateForCursor(presenter, 3)).toEqual {top: 5, left: 12 * 10, width: 10, height: 5}
+          expect(stateForCursor(presenter, 4)).toEqual {top: 8 * 5 - 20, left: 4 * 10, width: 10, height: 5}
 
         it "updates when scoped character widths change", ->
           waitsForPromise ->
@@ -1121,10 +1448,14 @@ describe "TextEditorPresenter", ->
             editor.setCursorBufferPosition([1, 4])
             presenter = buildPresenter(explicitHeight: 20)
 
-            expectStateUpdate presenter, -> presenter.setScopedCharacterWidth(['source.js', 'storage.modifier.js'], 'v', 20)
+            expectStateUpdate presenter, ->
+              presenter.getLinesYardstick().setScopedCharacterWidth(['source.js', 'storage.type.var.js'], 'v', 20)
+              presenter.characterWidthsChanged()
             expect(stateForCursor(presenter, 0)).toEqual {top: 1 * 10, left: (3 * 10) + 20, width: 10, height: 10}
 
-            expectStateUpdate presenter, -> presenter.setScopedCharacterWidth(['source.js', 'storage.modifier.js'], 'r', 20)
+            expectStateUpdate presenter, ->
+              presenter.getLinesYardstick().setScopedCharacterWidth(['source.js', 'storage.type.var.js'], 'r', 20)
+              presenter.characterWidthsChanged()
             expect(stateForCursor(presenter, 0)).toEqual {top: 1 * 10, left: (3 * 10) + 20, width: 20, height: 10}
 
         it "updates when cursors are added, moved, hidden, shown, or destroyed", ->
@@ -1137,11 +1468,11 @@ describe "TextEditorPresenter", ->
           # moving into view
           expect(stateForCursor(presenter, 0)).toBeUndefined()
           editor.getCursors()[0].setBufferPosition([2, 4])
-          expect(stateForCursor(presenter, 0)).toEqual {top: 2 * 10, left: 4 * 10, width: 10, height: 10}
+          expect(stateForCursor(presenter, 0)).toEqual {top: 0, left: 4 * 10, width: 10, height: 10}
 
           # showing
           expectStateUpdate presenter, -> editor.getSelections()[1].clear()
-          expect(stateForCursor(presenter, 1)).toEqual {top: 3 * 10, left: 5 * 10, width: 10, height: 10}
+          expect(stateForCursor(presenter, 1)).toEqual {top: 0, left: 5 * 10, width: 10, height: 10}
 
           # hiding
           expectStateUpdate presenter, -> editor.getSelections()[1].setBufferRange([[3, 4], [3, 5]])
@@ -1153,11 +1484,11 @@ describe "TextEditorPresenter", ->
 
           # adding
           expectStateUpdate presenter, -> editor.addCursorAtBufferPosition([4, 4])
-          expect(stateForCursor(presenter, 2)).toEqual {top: 4 * 10, left: 4 * 10, width: 10, height: 10}
+          expect(stateForCursor(presenter, 2)).toEqual {top: 0, left: 4 * 10, width: 10, height: 10}
 
           # moving added cursor
           expectStateUpdate presenter, -> editor.getCursors()[2].setBufferPosition([4, 6])
-          expect(stateForCursor(presenter, 2)).toEqual {top: 4 * 10, left: 6 * 10, width: 10, height: 10}
+          expect(stateForCursor(presenter, 2)).toEqual {top: 0, left: 6 * 10, width: 10, height: 10}
 
           # destroying
           destroyedCursor = editor.getCursors()[2]
@@ -1173,7 +1504,8 @@ describe "TextEditorPresenter", ->
         it "alternates between true and false twice per ::cursorBlinkPeriod when the editor is focused", ->
           cursorBlinkPeriod = 100
           cursorBlinkResumeDelay = 200
-          presenter = buildPresenter({cursorBlinkPeriod, cursorBlinkResumeDelay, focused: true})
+          presenter = buildPresenter({cursorBlinkPeriod, cursorBlinkResumeDelay})
+          presenter.setFocused(true)
 
           expect(presenter.getState().content.cursorsVisible).toBe true
           expectStateUpdate presenter, -> advanceClock(cursorBlinkPeriod / 2)
@@ -1200,7 +1532,8 @@ describe "TextEditorPresenter", ->
         it "stops alternating for ::cursorBlinkResumeDelay when a cursor moves or a cursor is added", ->
           cursorBlinkPeriod = 100
           cursorBlinkResumeDelay = 200
-          presenter = buildPresenter({cursorBlinkPeriod, cursorBlinkResumeDelay, focused: true})
+          presenter = buildPresenter({cursorBlinkPeriod, cursorBlinkResumeDelay})
+          presenter.setFocused(true)
 
           expect(presenter.getState().content.cursorsVisible).toBe true
           expectStateUpdate presenter, -> advanceClock(cursorBlinkPeriod / 2)
@@ -1228,12 +1561,22 @@ describe "TextEditorPresenter", ->
           expect(presenter.getState().content.cursorsVisible).toBe false
 
       describe ".highlights", ->
-        stateForHighlight = (presenter, decoration) ->
-          presenter.getState().content.highlights[decoration.id]
+        expectUndefinedStateForHighlight = (presenter, decoration) ->
+          for tileId, tileState of presenter.getState().content.tiles
+            state = stateForHighlightInTile(presenter, decoration, tileId)
+            expect(state).toBeUndefined()
 
-        stateForSelection = (presenter, selectionIndex) ->
+        stateForHighlightInTile = (presenter, decoration, tile) ->
+          presenter.getState().content.tiles[tile]?.highlights[decoration.id]
+
+        stateForSelectionInTile = (presenter, selectionIndex, tile) ->
           selection = presenter.model.getSelections()[selectionIndex]
-          stateForHighlight(presenter, selection.decoration)
+          stateForHighlightInTile(presenter, selection.decoration, tile)
+
+        expectUndefinedStateForSelection = (presenter, selectionIndex) ->
+          for tileId, tileState of presenter.getState().content.tiles
+            state = stateForSelectionInTile(presenter, selectionIndex, tileId)
+            expect(state).toBeUndefined()
 
         it "contains states for highlights that are visible on screen", ->
           # off-screen above
@@ -1248,11 +1591,11 @@ describe "TextEditorPresenter", ->
           marker3 = editor.markBufferRange([[0, 6], [3, 6]])
           highlight3 = editor.decorateMarker(marker3, type: 'highlight', class: 'c')
 
-          # on-screen
+          # on-screen, spans over 2 tiles
           marker4 = editor.markBufferRange([[2, 6], [4, 6]])
           highlight4 = editor.decorateMarker(marker4, type: 'highlight', class: 'd')
 
-          # partially off-screen below, 2 of 3 regions on screen
+          # partially off-screen below, spans over 3 tiles, 2 of 3 regions on screen
           marker5 = editor.markBufferRange([[3, 6], [6, 6]])
           highlight5 = editor.decorateMarker(marker5, type: 'highlight', class: 'e')
 
@@ -1268,107 +1611,150 @@ describe "TextEditorPresenter", ->
           marker8 = editor.markBufferRange([[2, 2], [2, 2]])
           highlight8 = editor.decorateMarker(marker8, type: 'highlight', class: 'h')
 
-          presenter = buildPresenter(explicitHeight: 30, scrollTop: 20)
+          # partially off-screen above, empty
+          marker9 = editor.markBufferRange([[0, 0], [2, 0]], invalidate: 'touch')
+          highlight9 = editor.decorateMarker(marker9, type: 'highlight', class: 'h')
 
-          expect(stateForHighlight(presenter, highlight1)).toBeUndefined()
+          presenter = buildPresenter(explicitHeight: 30, scrollTop: 20, tileSize: 2)
 
-          expectValues stateForHighlight(presenter, highlight2), {
+          expectUndefinedStateForHighlight(presenter, highlight1)
+
+          expectValues stateForHighlightInTile(presenter, highlight2, 2), {
             class: 'b'
             regions: [
-              {top: 2 * 10, left: 0 * 10, width: 6 * 10, height: 1 * 10}
+              {top: 0, left: 0 * 10, width: 6 * 10, height: 1 * 10}
             ]
           }
 
-          expectValues stateForHighlight(presenter, highlight3), {
+          expectValues stateForHighlightInTile(presenter, highlight3, 2), {
             class: 'c'
             regions: [
-              {top: 2 * 10, left: 0 * 10, right: 0, height: 1 * 10}
-              {top: 3 * 10, left: 0 * 10, width: 6 * 10, height: 1 * 10}
+              {top: 0, left: 0 * 10, right: 0, height: 1 * 10}
+              {top: 10, left: 0 * 10, width: 6 * 10, height: 1 * 10}
             ]
           }
 
-          expectValues stateForHighlight(presenter, highlight4), {
+          expectValues stateForHighlightInTile(presenter, highlight4, 2), {
             class: 'd'
             regions: [
-              {top: 2 * 10, left: 6 * 10, right: 0, height: 1 * 10}
-              {top: 3 * 10, left: 0, right: 0, height: 1 * 10}
-              {top: 4 * 10, left: 0, width: 6 * 10, height: 1 * 10}
+              {top: 0, left: 6 * 10, right: 0, height: 1 * 10}
+              {top: 10, left: 0, right: 0, height: 1 * 10}
+            ]
+          }
+          expectValues stateForHighlightInTile(presenter, highlight4, 4), {
+            class: 'd'
+            regions: [
+              {top: 0, left: 0, width: 60, height: 1 * 10}
             ]
           }
 
-          expectValues stateForHighlight(presenter, highlight5), {
+          expectValues stateForHighlightInTile(presenter, highlight5, 2), {
             class: 'e'
             regions: [
-              {top: 3 * 10, left: 6 * 10, right: 0, height: 1 * 10}
-              {top: 4 * 10, left: 0 * 10, right: 0, height: 2 * 10}
+              {top: 10, left: 6 * 10, right: 0, height: 1 * 10}
             ]
           }
 
-          expectValues stateForHighlight(presenter, highlight6), {
+          expectValues stateForHighlightInTile(presenter, highlight5, 4), {
+            class: 'e'
+            regions: [
+              {top: 0, left: 0, right: 0, height: 1 * 10}
+              {top: 10, left: 0, right: 0, height: 1 * 10}
+            ]
+          }
+
+          expect(stateForHighlightInTile(presenter, highlight5, 6)).toBeUndefined()
+
+          expectValues stateForHighlightInTile(presenter, highlight6, 4), {
             class: 'f'
             regions: [
-              {top: 5 * 10, left: 6 * 10, right: 0, height: 1 * 10}
+              {top: 10, left: 6 * 10, right: 0, height: 1 * 10}
             ]
           }
 
-          expect(stateForHighlight(presenter, highlight7)).toBeUndefined()
-          expect(stateForHighlight(presenter, highlight8)).toBeUndefined()
+          expect(stateForHighlightInTile(presenter, highlight6, 6)).toBeUndefined()
+
+          expectUndefinedStateForHighlight(presenter, highlight7)
+          expectUndefinedStateForHighlight(presenter, highlight8)
+          expectUndefinedStateForHighlight(presenter, highlight9)
 
         it "is empty until all of the required measurements are assigned", ->
           editor.setSelectedBufferRanges([
             [[0, 2], [2, 4]],
           ])
 
-          presenter = buildPresenter(explicitHeight: null, lineHeight: null, scrollTop: null, baseCharacterWidth: null)
-          expect(presenter.getState().content.highlights).toEqual({})
+          presenter = buildPresenterWithoutMeasurements(tileSize: 2)
+          for tileId, tileState of presenter.getState().content.tiles
+            expect(tileState.highlights).toEqual({})
 
           presenter.setExplicitHeight(25)
-          expect(presenter.getState().content.highlights).toEqual({})
+          for tileId, tileState of presenter.getState().content.tiles
+            expect(tileState.highlights).toEqual({})
 
           presenter.setLineHeight(10)
-          expect(presenter.getState().content.highlights).toEqual({})
+          for tileId, tileState of presenter.getState().content.tiles
+            expect(tileState.highlights).toEqual({})
 
           presenter.setScrollTop(0)
-          expect(presenter.getState().content.highlights).toEqual({})
+          for tileId, tileState of presenter.getState().content.tiles
+            expect(tileState.highlights).toEqual({})
 
           presenter.setBaseCharacterWidth(8)
-          expect(presenter.getState().content.highlights).not.toEqual({})
+          assignedAnyHighlight = false
+          for tileId, tileState of presenter.getState().content.tiles
+            assignedAnyHighlight ||= _.isEqual(tileState.highlights, {})
+
+          expect(assignedAnyHighlight).toBe(true)
 
         it "does not include highlights for invalid markers", ->
           marker = editor.markBufferRange([[2, 2], [2, 4]], invalidate: 'touch')
           highlight = editor.decorateMarker(marker, type: 'highlight', class: 'h')
 
-          presenter = buildPresenter(explicitHeight: 30, scrollTop: 20)
+          presenter = buildPresenter(explicitHeight: 30, scrollTop: 20, tileSize: 2)
 
-          expect(stateForHighlight(presenter, highlight)).toBeDefined()
+          expect(stateForHighlightInTile(presenter, highlight, 2)).toBeDefined()
+
           expectStateUpdate presenter, -> editor.getBuffer().insert([2, 2], "stuff")
-          expect(stateForHighlight(presenter, highlight)).toBeUndefined()
+
+          expectUndefinedStateForHighlight(presenter, highlight)
+
+        it "does not include highlights that end before the first visible row", ->
+          editor.setText("Lorem ipsum dolor sit amet, consectetuer adipiscing elit, sed diam nonummy nibh euismod tincidunt ut laoreet dolore magna aliquam erat volutpat. Ut wisi enim ad minim veniam, quis nostrud exerci tation ullamcorper suscipit lobortis nisl ut aliquip ex ea commodo consequat.")
+          editor.setSoftWrapped(true)
+          editor.setWidth(100, true)
+          editor.setDefaultCharWidth(10)
+
+          marker = editor.markBufferRange([[0, 0], [0, 4]], invalidate: 'never')
+          highlight = editor.decorateMarker(marker, type: 'highlight', class: 'a')
+          presenter = buildPresenter(explicitHeight: 30, scrollTop: 10, tileSize: 2)
+
+          expect(stateForHighlightInTile(presenter, highlight, 0)).toBeUndefined()
 
         it "updates when ::scrollTop changes", ->
           editor.setSelectedBufferRanges([
             [[6, 2], [6, 4]],
           ])
 
-          presenter = buildPresenter(explicitHeight: 30, scrollTop: 20)
+          presenter = buildPresenter(explicitHeight: 30, scrollTop: 20, tileSize: 2)
 
-          expect(stateForSelection(presenter, 0)).toBeUndefined()
+          expectUndefinedStateForSelection(presenter, 0)
           expectStateUpdate presenter, -> presenter.setScrollTop(5 * 10)
-          expect(stateForSelection(presenter, 0)).toBeDefined()
+          expect(stateForSelectionInTile(presenter, 0, 6)).toBeDefined()
           expectStateUpdate presenter, -> presenter.setScrollTop(2 * 10)
-          expect(stateForSelection(presenter, 0)).toBeUndefined()
+          expectUndefinedStateForSelection(presenter, 0)
 
         it "updates when ::explicitHeight changes", ->
           editor.setSelectedBufferRanges([
             [[6, 2], [6, 4]],
           ])
 
-          presenter = buildPresenter(explicitHeight: 20, scrollTop: 20)
+          presenter = buildPresenter(explicitHeight: 20, scrollTop: 20, tileSize: 2)
 
-          expect(stateForSelection(presenter, 0)).toBeUndefined()
+          expectUndefinedStateForSelection(presenter, 0)
           expectStateUpdate presenter, -> presenter.setExplicitHeight(60)
-          expect(stateForSelection(presenter, 0)).toBeDefined()
+          expect(stateForSelectionInTile(presenter, 0, 6)).toBeDefined()
           expectStateUpdate presenter, -> presenter.setExplicitHeight(20)
-          expect(stateForSelection(presenter, 0)).toBeUndefined()
+          expectUndefinedStateForSelection(presenter, 0)
 
         it "updates when ::lineHeight changes", ->
           editor.setSelectedBufferRanges([
@@ -1376,42 +1762,27 @@ describe "TextEditorPresenter", ->
             [[3, 4], [3, 6]],
           ])
 
-          presenter = buildPresenter(explicitHeight: 20, scrollTop: 0)
+          presenter = buildPresenter(explicitHeight: 20, scrollTop: 0, tileSize: 2)
 
-          expectValues stateForSelection(presenter, 0), {
+          expectValues stateForSelectionInTile(presenter, 0, 2), {
             regions: [
-              {top: 2 * 10, left: 2 * 10, width: 2 * 10, height: 10}
+              {top: 0, left: 2 * 10, width: 2 * 10, height: 10}
             ]
           }
-          expect(stateForSelection(presenter, 1)).toBeUndefined()
+          expectUndefinedStateForSelection(presenter, 1)
 
           expectStateUpdate presenter, -> presenter.setLineHeight(5)
 
-          expectValues stateForSelection(presenter, 0), {
+          expectValues stateForSelectionInTile(presenter, 0, 2), {
             regions: [
-              {top: 2 * 5, left: 2 * 10, width: 2 * 10, height: 5}
+              {top: 0, left: 2 * 10, width: 2 * 10, height: 5}
             ]
           }
 
-          expectValues stateForSelection(presenter, 1), {
+          expectValues stateForSelectionInTile(presenter, 1, 2), {
             regions: [
-              {top: 3 * 5, left: 4 * 10, width: 2 * 10, height: 5}
+              {top: 5, left: 4 * 10, width: 2 * 10, height: 5}
             ]
-          }
-
-        it "updates when ::baseCharacterWidth changes", ->
-          editor.setSelectedBufferRanges([
-            [[2, 2], [2, 4]],
-          ])
-
-          presenter = buildPresenter(explicitHeight: 20, scrollTop: 0)
-
-          expectValues stateForSelection(presenter, 0), {
-            regions: [{top: 2 * 10, left: 2 * 10, width: 2 * 10, height: 10}]
-          }
-          expectStateUpdate presenter, -> presenter.setBaseCharacterWidth(20)
-          expectValues stateForSelection(presenter, 0), {
-            regions: [{top: 2 * 10, left: 2 * 20, width: 2 * 20, height: 10}]
           }
 
         it "updates when scoped character widths change", ->
@@ -1423,14 +1794,16 @@ describe "TextEditorPresenter", ->
               [[2, 4], [2, 6]],
             ])
 
-            presenter = buildPresenter(explicitHeight: 20, scrollTop: 0)
+            presenter = buildPresenter(explicitHeight: 20, scrollTop: 0, tileSize: 2)
 
-            expectValues stateForSelection(presenter, 0), {
-              regions: [{top: 2 * 10, left: 4 * 10, width: 2 * 10, height: 10}]
+            expectValues stateForSelectionInTile(presenter, 0, 2), {
+              regions: [{top: 0, left: 4 * 10, width: 2 * 10, height: 10}]
             }
-            expectStateUpdate presenter, -> presenter.setScopedCharacterWidth(['source.js', 'keyword.control.js'], 'i', 20)
-            expectValues stateForSelection(presenter, 0), {
-              regions: [{top: 2 * 10, left: 4 * 10, width: 20 + 10, height: 10}]
+            expectStateUpdate presenter, ->
+              presenter.getLinesYardstick().setScopedCharacterWidth(['source.js', 'keyword.control.js'], 'i', 20)
+              presenter.characterWidthsChanged()
+            expectValues stateForSelectionInTile(presenter, 0, 2), {
+              regions: [{top: 0, left: 4 * 10, width: 20 + 10, height: 10}]
             }
 
         it "updates when highlight decorations are added, moved, hidden, shown, or destroyed", ->
@@ -1438,80 +1811,107 @@ describe "TextEditorPresenter", ->
             [[1, 2], [1, 4]],
             [[3, 4], [3, 6]]
           ])
-          presenter = buildPresenter(explicitHeight: 20, scrollTop: 0)
+          presenter = buildPresenter(explicitHeight: 20, scrollTop: 0, tileSize: 2)
 
-          expectValues stateForSelection(presenter, 0), {
-            regions: [{top: 1 * 10, left: 2 * 10, width: 2 * 10, height: 10}]
+          expectValues stateForSelectionInTile(presenter, 0, 0), {
+            regions: [{top: 10, left: 2 * 10, width: 2 * 10, height: 10}]
           }
-          expect(stateForSelection(presenter, 1)).toBeUndefined()
+          expectUndefinedStateForSelection(presenter, 1)
 
           # moving into view
-          expectStateUpdate presenter, -> editor.getSelections()[1].setBufferRange([[2, 4], [2, 6]], autoscroll: false)
-          expectValues stateForSelection(presenter, 1), {
-            regions: [{top: 2 * 10, left: 4 * 10, width: 2 * 10, height: 10}]
-          }
+          waitsForStateToUpdate presenter, -> editor.getSelections()[1].setBufferRange([[2, 4], [2, 6]], autoscroll: false)
+          runs ->
+            expectValues stateForSelectionInTile(presenter, 1, 2), {
+              regions: [{top: 0, left: 4 * 10, width: 2 * 10, height: 10}]
+            }
 
           # becoming empty
-          expectStateUpdate presenter, -> editor.getSelections()[1].clear(autoscroll: false)
-          expect(stateForSelection(presenter, 1)).toBeUndefined()
+          waitsForStateToUpdate presenter, -> editor.getSelections()[1].clear(autoscroll: false)
+          runs ->
+            expectUndefinedStateForSelection(presenter, 1)
 
           # becoming non-empty
-          expectStateUpdate presenter, -> editor.getSelections()[1].setBufferRange([[2, 4], [2, 6]], autoscroll: false)
-          expectValues stateForSelection(presenter, 1), {
-            regions: [{top: 2 * 10, left: 4 * 10, width: 2 * 10, height: 10}]
-          }
+          waitsForStateToUpdate presenter, -> editor.getSelections()[1].setBufferRange([[2, 4], [2, 6]], autoscroll: false)
+          runs ->
+            expectValues stateForSelectionInTile(presenter, 1, 2), {
+              regions: [{top: 0, left: 4 * 10, width: 2 * 10, height: 10}]
+            }
 
           # moving out of view
-          expectStateUpdate presenter, -> editor.getSelections()[1].setBufferRange([[3, 4], [3, 6]], autoscroll: false)
-          expect(stateForSelection(presenter, 1)).toBeUndefined()
+          waitsForStateToUpdate presenter, -> editor.getSelections()[1].setBufferRange([[3, 4], [3, 6]], autoscroll: false)
+          runs ->
+            expectUndefinedStateForSelection(presenter, 1)
 
           # adding
-          expectStateUpdate presenter, -> editor.addSelectionForBufferRange([[1, 4], [1, 6]], autoscroll: false)
-          expectValues stateForSelection(presenter, 2), {
-            regions: [{top: 1 * 10, left: 4 * 10, width: 2 * 10, height: 10}]
-          }
+          waitsForStateToUpdate presenter, -> editor.addSelectionForBufferRange([[1, 4], [1, 6]], autoscroll: false)
+          runs ->
+            expectValues stateForSelectionInTile(presenter, 2, 0), {
+              regions: [{top: 10, left: 4 * 10, width: 2 * 10, height: 10}]
+            }
 
           # moving added selection
-          expectStateUpdate presenter, -> editor.getSelections()[2].setBufferRange([[1, 4], [1, 8]], autoscroll: false)
-          expectValues stateForSelection(presenter, 2), {
-            regions: [{top: 1 * 10, left: 4 * 10, width: 4 * 10, height: 10}]
-          }
+          waitsForStateToUpdate presenter, -> editor.getSelections()[2].setBufferRange([[1, 4], [1, 8]], autoscroll: false)
 
-          # destroying
-          destroyedSelection = editor.getSelections()[2]
-          expectStateUpdate presenter, -> destroyedSelection.destroy()
-          expect(stateForHighlight(presenter, destroyedSelection.decoration)).toBeUndefined()
+          destroyedSelection = null
+          runs ->
+            expectValues stateForSelectionInTile(presenter, 2, 0), {
+              regions: [{top: 10, left: 4 * 10, width: 4 * 10, height: 10}]
+            }
+
+            # destroying
+            destroyedSelection = editor.getSelections()[2]
+
+          waitsForStateToUpdate presenter, -> destroyedSelection.destroy()
+          runs ->
+            expectUndefinedStateForHighlight(presenter, destroyedSelection.decoration)
 
         it "updates when highlight decorations' properties are updated", ->
-          marker = editor.markBufferRange([[2, 2], [2, 4]])
+          marker = editor.markBufferPosition([2, 2])
           highlight = editor.decorateMarker(marker, type: 'highlight', class: 'a')
 
-          presenter = buildPresenter(explicitHeight: 30, scrollTop: 20)
+          presenter = buildPresenter(explicitHeight: 30, scrollTop: 20, tileSize: 2)
 
-          expectValues stateForHighlight(presenter, highlight), {class: 'a'}
-          expectStateUpdate presenter, -> highlight.setProperties(class: 'b', type: 'highlight')
-          expectValues stateForHighlight(presenter, highlight), {class: 'b'}
+          expectUndefinedStateForHighlight(presenter, highlight)
+
+          waitsForStateToUpdate presenter, ->
+            marker.setBufferRange([[2, 2], [2, 4]])
+            highlight.setProperties(class: 'b', type: 'highlight')
+
+          runs ->
+            expectValues stateForHighlightInTile(presenter, highlight, 2), {class: 'b'}
 
         it "increments the .flashCount and sets the .flashClass and .flashDuration when the highlight model flashes", ->
-          presenter = buildPresenter(explicitHeight: 30, scrollTop: 20)
+          presenter = buildPresenter(explicitHeight: 30, scrollTop: 20, tileSize: 2)
 
-          marker = editor.markBufferRange([[2, 2], [2, 4]])
+          marker = editor.markBufferPosition([2, 2])
           highlight = editor.decorateMarker(marker, type: 'highlight', class: 'a')
-          expectStateUpdate presenter, -> highlight.flash('b', 500)
+          waitsForStateToUpdate presenter, ->
+            marker.setBufferRange([[2, 2], [5, 2]])
+            highlight.flash('b', 500)
+          runs ->
+            expectValues stateForHighlightInTile(presenter, highlight, 2), {
+              flashClass: 'b'
+              flashDuration: 500
+              flashCount: 1
+            }
+            expectValues stateForHighlightInTile(presenter, highlight, 4), {
+              flashClass: 'b'
+              flashDuration: 500
+              flashCount: 1
+            }
 
-          expectValues stateForHighlight(presenter, highlight), {
-            flashClass: 'b'
-            flashDuration: 500
-            flashCount: 1
-          }
-
-          expectStateUpdate presenter, -> highlight.flash('c', 600)
-
-          expectValues stateForHighlight(presenter, highlight), {
-            flashClass: 'c'
-            flashDuration: 600
-            flashCount: 2
-          }
+          waitsForStateToUpdate presenter, -> highlight.flash('c', 600)
+          runs ->
+            expectValues stateForHighlightInTile(presenter, highlight, 2), {
+              flashClass: 'c'
+              flashDuration: 600
+              flashCount: 2
+            }
+            expectValues stateForHighlightInTile(presenter, highlight, 4), {
+              flashClass: 'c'
+              flashDuration: 600
+              flashCount: 2
+            }
 
       describe ".overlays", ->
         [item] = []
@@ -1519,7 +1919,7 @@ describe "TextEditorPresenter", ->
           presenter.getState().content.overlays[decoration.id]
 
         it "contains state for overlay decorations both initially and when their markers move", ->
-          marker = editor.markBufferPosition([2, 13], invalidate: 'touch')
+          marker = editor.addMarkerLayer(maintainHistory: true).markBufferPosition([2, 13], invalidate: 'touch')
           decoration = editor.decorateMarker(marker, {type: 'overlay', item})
           presenter = buildPresenter(explicitHeight: 30, scrollTop: 20)
 
@@ -1530,42 +1930,49 @@ describe "TextEditorPresenter", ->
           }
 
           # Change range
-          expectStateUpdate presenter, -> marker.setBufferRange([[2, 13], [4, 6]])
-          expectValues stateForOverlay(presenter, decoration), {
-            item: item
-            pixelPosition: {top: 5 * 10 - presenter.state.content.scrollTop, left: 6 * 10}
-          }
+          waitsForStateToUpdate presenter, -> marker.setBufferRange([[2, 13], [4, 6]])
+          runs ->
+            expectValues stateForOverlay(presenter, decoration), {
+              item: item
+              pixelPosition: {top: 5 * 10 - presenter.state.content.scrollTop, left: 6 * 10}
+            }
 
-          # Valid -> invalid
-          expectStateUpdate presenter, -> editor.getBuffer().insert([2, 14], 'x')
-          expect(stateForOverlay(presenter, decoration)).toBeUndefined()
+            # Valid -> invalid
+          waitsForStateToUpdate presenter, -> editor.getBuffer().insert([2, 14], 'x')
+          runs ->
+            expect(stateForOverlay(presenter, decoration)).toBeUndefined()
 
-          # Invalid -> valid
-          expectStateUpdate presenter, -> editor.undo()
-          expectValues stateForOverlay(presenter, decoration), {
-            item: item
-            pixelPosition: {top: 5 * 10 - presenter.state.content.scrollTop, left: 6 * 10}
-          }
+            # Invalid -> valid
+          waitsForStateToUpdate presenter, -> editor.undo()
+          runs ->
+            expectValues stateForOverlay(presenter, decoration), {
+              item: item
+              pixelPosition: {top: 5 * 10 - presenter.state.content.scrollTop, left: 6 * 10}
+            }
 
           # Reverse direction
-          expectStateUpdate presenter, -> marker.setBufferRange([[2, 13], [4, 6]], reversed: true)
-          expectValues stateForOverlay(presenter, decoration), {
-            item: item
-            pixelPosition: {top: 3 * 10 - presenter.state.content.scrollTop, left: 13 * 10}
-          }
+          waitsForStateToUpdate presenter, -> marker.setBufferRange([[2, 13], [4, 6]], reversed: true)
+          runs ->
+            expectValues stateForOverlay(presenter, decoration), {
+              item: item
+              pixelPosition: {top: 3 * 10 - presenter.state.content.scrollTop, left: 13 * 10}
+            }
 
           # Destroy
-          decoration.destroy()
-          expect(stateForOverlay(presenter, decoration)).toBeUndefined()
+          waitsForStateToUpdate presenter, -> decoration.destroy()
+          runs ->
+            expect(stateForOverlay(presenter, decoration)).toBeUndefined()
 
           # Add
-          decoration2 = editor.decorateMarker(marker, {type: 'overlay', item})
-          expectValues stateForOverlay(presenter, decoration2), {
-            item: item
-            pixelPosition: {top: 3 * 10 - presenter.state.content.scrollTop, left: 13 * 10}
-          }
+          decoration2 = null
+          waitsForStateToUpdate presenter, -> decoration2 = editor.decorateMarker(marker, {type: 'overlay', item})
+          runs ->
+            expectValues stateForOverlay(presenter, decoration2), {
+              item: item
+              pixelPosition: {top: 3 * 10 - presenter.state.content.scrollTop, left: 13 * 10}
+            }
 
-        it "updates when ::baseCharacterWidth changes", ->
+        it "updates when character widths changes", ->
           scrollTop = 20
           marker = editor.markBufferPosition([2, 13], invalidate: 'touch')
           decoration = editor.decorateMarker(marker, {type: 'overlay', item})
@@ -1615,7 +2022,7 @@ describe "TextEditorPresenter", ->
           marker = editor.markBufferRange([[2, 13], [4, 14]], invalidate: 'touch')
           decoration = editor.decorateMarker(marker, {type: 'overlay', position: 'tail', item})
 
-          presenter = buildPresenter(baseCharacterWidth: null, lineHeight: null, windowWidth: null, windowHeight: null, boundingClientRect: null)
+          presenter = buildPresenterWithoutMeasurements()
           expect(presenter.getState().content.overlays).toEqual({})
 
           presenter.setBaseCharacterWidth(10)
@@ -1625,6 +2032,12 @@ describe "TextEditorPresenter", ->
           expect(presenter.getState().content.overlays).toEqual({})
 
           presenter.setWindowSize(500, 100)
+          expect(presenter.getState().content.overlays).toEqual({})
+
+          presenter.setVerticalScrollbarWidth(10)
+          expect(presenter.getState().content.overlays).toEqual({})
+
+          presenter.setHorizontalScrollbarHeight(10)
           expect(presenter.getState().content.overlays).toEqual({})
 
           presenter.setBoundingClientRect({top: 0, left: 0, height: 100, width: 500})
@@ -1691,7 +2104,8 @@ describe "TextEditorPresenter", ->
 
             expectStateUpdate presenter, ->
               editor.insertNewline()
-              editor.setScrollTop(scrollTop) # I'm fighting the editor
+              presenter.setScrollTop(scrollTop) # I'm fighting the editor
+
             expectValues stateForOverlay(presenter, decoration), {
               item: item
               pixelPosition: {top: 6 * 10 - scrollTop - itemHeight, left: gutterWidth}
@@ -1793,8 +2207,27 @@ describe "TextEditorPresenter", ->
               }
 
     describe ".height", ->
+      it "updates model's rows per page when it changes", ->
+        presenter = buildPresenter(explicitHeight: 50, lineHeightInPixels: 10, horizontalScrollbarHeight: 10)
+
+        presenter.getState() # trigger state update
+        expect(editor.getRowsPerPage()).toBe(4)
+
+        presenter.setExplicitHeight(100)
+        presenter.getState() # trigger state update
+        expect(editor.getRowsPerPage()).toBe(9)
+
+        presenter.setHorizontalScrollbarHeight(0)
+        presenter.getState() # trigger state update
+        expect(editor.getRowsPerPage()).toBe(10)
+
+        presenter.setLineHeight(5)
+        presenter.getState() # trigger state update
+        expect(editor.getRowsPerPage()).toBe(20)
+
       it "tracks the computed content height if ::autoHeight is true so the editor auto-expands vertically", ->
-        presenter = buildPresenter(explicitHeight: null, autoHeight: true)
+        presenter = buildPresenter(explicitHeight: null)
+        presenter.setAutoHeight(true)
         expect(presenter.getState().height).toBe editor.getScreenLineCount() * 10
 
         expectStateUpdate presenter, -> presenter.setAutoHeight(false)
@@ -1811,7 +2244,9 @@ describe "TextEditorPresenter", ->
 
     describe ".focused", ->
       it "tracks the value of ::focused", ->
-        presenter = buildPresenter(focused: false)
+        presenter = buildPresenter()
+        presenter.setFocused(false)
+
         expect(presenter.getState().focused).toBe false
         expectStateUpdate presenter, -> presenter.setFocused(true)
         expect(presenter.getState().focused).toBe true
@@ -1901,303 +2336,248 @@ describe "TextEditorPresenter", ->
             editor.setText("1\n2\n3")
             expect(getLineNumberGutterState(presenter).content.maxLineNumberDigits).toBe 1
 
-        describe ".content.lineNumbers", ->
+        describe ".content.tiles", ->
           lineNumberStateForScreenRow = (presenter, screenRow) ->
             editor = presenter.model
-            bufferRow = editor.bufferRowForScreenRow(screenRow)
-            wrapCount = screenRow - editor.screenRowForBufferRow(bufferRow)
-            if wrapCount > 0
-              key = bufferRow + '-' + wrapCount
-            else
-              key = bufferRow
+            tileRow = presenter.tileForRow(screenRow)
+            line = editor.tokenizedLineForScreenRow(screenRow)
 
-            getLineNumberGutterState(presenter).content.lineNumbers[key]
+            gutterState = getLineNumberGutterState(presenter)
+            gutterState.content.tiles[tileRow]?.lineNumbers[line?.id]
 
-          it "contains states for line numbers that are visible on screen, plus and minus the overdraw margin", ->
-            editor.foldBufferRow(4)
-            editor.setSoftWrapped(true)
-            editor.setEditorWidthInChars(50)
-            presenter = buildPresenter(explicitHeight: 25, scrollTop: 30, lineHeight: 10, lineOverdrawMargin: 1)
+          tiledContentContract (presenter) -> getLineNumberGutterState(presenter).content
 
-            expect(lineNumberStateForScreenRow(presenter, 1)).toBeUndefined()
-            expectValues lineNumberStateForScreenRow(presenter, 2), {screenRow: 2, bufferRow: 2, softWrapped: false, top: 2 * 10}
-            expectValues lineNumberStateForScreenRow(presenter, 3), {screenRow: 3, bufferRow: 3, softWrapped: false, top: 3 * 10}
-            expectValues lineNumberStateForScreenRow(presenter, 4), {screenRow: 4, bufferRow: 3, softWrapped: true, top: 4 * 10}
-            expectValues lineNumberStateForScreenRow(presenter, 5), {screenRow: 5, bufferRow: 4, softWrapped: false, top: 5 * 10}
-            expectValues lineNumberStateForScreenRow(presenter, 6), {screenRow: 6, bufferRow: 7, softWrapped: false, top: 6 * 10}
-            expectValues lineNumberStateForScreenRow(presenter, 7), {screenRow: 7, bufferRow: 8, softWrapped: false, top: 7 * 10}
-            expect(lineNumberStateForScreenRow(presenter, 8)).toBeUndefined()
-
-          it "includes states for all line numbers if no ::explicitHeight is assigned", ->
-            presenter = buildPresenter(explicitHeight: null)
-            expect(lineNumberStateForScreenRow(presenter, 0)).toBeDefined()
-            expect(lineNumberStateForScreenRow(presenter, 12)).toBeDefined()
-
-          it "updates when ::scrollTop changes", ->
-            editor.foldBufferRow(4)
-            editor.setSoftWrapped(true)
-            editor.setEditorWidthInChars(50)
-            presenter = buildPresenter(explicitHeight: 25, scrollTop: 30, lineOverdrawMargin: 1)
-
-            expect(lineNumberStateForScreenRow(presenter, 1)).toBeUndefined()
-            expectValues lineNumberStateForScreenRow(presenter, 2), {bufferRow: 2}
-            expectValues lineNumberStateForScreenRow(presenter, 7), {bufferRow: 8}
-            expect(lineNumberStateForScreenRow(presenter, 8)).toBeUndefined()
-
-            expectStateUpdate presenter, -> presenter.setScrollTop(20)
-
-            expect(lineNumberStateForScreenRow(presenter, 0)).toBeUndefined()
-            expectValues lineNumberStateForScreenRow(presenter, 1), {bufferRow: 1}
-            expectValues lineNumberStateForScreenRow(presenter, 6), {bufferRow: 7}
-            expect(lineNumberStateForScreenRow(presenter, 7)).toBeUndefined()
-
-          it "updates when ::explicitHeight changes", ->
-            editor.foldBufferRow(4)
-            editor.setSoftWrapped(true)
-            editor.setEditorWidthInChars(50)
-            presenter = buildPresenter(explicitHeight: 25, scrollTop: 30, lineOverdrawMargin: 1)
-
-            expect(lineNumberStateForScreenRow(presenter, 1)).toBeUndefined()
-            expectValues lineNumberStateForScreenRow(presenter, 2), {bufferRow: 2}
-            expectValues lineNumberStateForScreenRow(presenter, 7), {bufferRow: 8}
-            expect(lineNumberStateForScreenRow(presenter, 8)).toBeUndefined()
-
-            expectStateUpdate presenter, -> presenter.setExplicitHeight(35)
-
-            expect(lineNumberStateForScreenRow(presenter, 0)).toBeUndefined()
-            expectValues lineNumberStateForScreenRow(presenter, 2), {bufferRow: 2}
-            expectValues lineNumberStateForScreenRow(presenter, 8), {bufferRow: 8}
-            expect(lineNumberStateForScreenRow(presenter, 9)).toBeUndefined()
-
-          it "updates when ::lineHeight changes", ->
-            editor.foldBufferRow(4)
-            editor.setSoftWrapped(true)
-            editor.setEditorWidthInChars(50)
-            presenter = buildPresenter(explicitHeight: 25, scrollTop: 0, lineOverdrawMargin: 0)
-
-            expectValues lineNumberStateForScreenRow(presenter, 0), {bufferRow: 0}
-            expectValues lineNumberStateForScreenRow(presenter, 3), {bufferRow: 3}
-            expect(lineNumberStateForScreenRow(presenter, 4)).toBeUndefined()
-
-            expectStateUpdate presenter, -> presenter.setLineHeight(5)
-
-            expectValues lineNumberStateForScreenRow(presenter, 0), {bufferRow: 0}
-            expectValues lineNumberStateForScreenRow(presenter, 5), {bufferRow: 4}
-            expect(lineNumberStateForScreenRow(presenter, 6)).toBeUndefined()
-
-          it "updates when the editor's content changes", ->
-            editor.foldBufferRow(4)
-            editor.setSoftWrapped(true)
-            editor.setEditorWidthInChars(50)
-            presenter = buildPresenter(explicitHeight: 35, scrollTop: 30, lineOverdrawMargin: 0)
-
-            expect(lineNumberStateForScreenRow(presenter, 2)).toBeUndefined()
-            expectValues lineNumberStateForScreenRow(presenter, 3), {bufferRow: 3}
-            expectValues lineNumberStateForScreenRow(presenter, 4), {bufferRow: 3}
-            expectValues lineNumberStateForScreenRow(presenter, 5), {bufferRow: 4}
-            expectValues lineNumberStateForScreenRow(presenter, 6), {bufferRow: 7}
-            expectValues lineNumberStateForScreenRow(presenter, 7), {bufferRow: 8}
-            expect(lineNumberStateForScreenRow(presenter, 8)).toBeUndefined()
-
-            expectStateUpdate presenter, ->
-              editor.getBuffer().insert([3, Infinity], new Array(25).join("x "))
-
-            expect(lineNumberStateForScreenRow(presenter, 2)).toBeUndefined()
-            expectValues lineNumberStateForScreenRow(presenter, 3), {bufferRow: 3}
-            expectValues lineNumberStateForScreenRow(presenter, 4), {bufferRow: 3}
-            expectValues lineNumberStateForScreenRow(presenter, 5), {bufferRow: 3}
-            expectValues lineNumberStateForScreenRow(presenter, 6), {bufferRow: 4}
-            expectValues lineNumberStateForScreenRow(presenter, 7), {bufferRow: 7}
-            expect(lineNumberStateForScreenRow(presenter, 8)).toBeUndefined()
-
-          it "does not remove out-of-view line numbers corresponding to ::mouseWheelScreenRow until ::stoppedScrollingDelay elapses", ->
-            presenter = buildPresenter(explicitHeight: 25, lineOverdrawMargin: 1, stoppedScrollingDelay: 200)
-
-            expect(lineNumberStateForScreenRow(presenter, 0)).toBeDefined()
-            expect(lineNumberStateForScreenRow(presenter, 4)).toBeDefined()
-            expect(lineNumberStateForScreenRow(presenter, 5)).toBeUndefined()
-
-            presenter.setMouseWheelScreenRow(0)
-            expectStateUpdate presenter, -> presenter.setScrollTop(35)
-
-            expect(lineNumberStateForScreenRow(presenter, 0)).toBeDefined()
-            expect(lineNumberStateForScreenRow(presenter, 1)).toBeUndefined()
-            expect(lineNumberStateForScreenRow(presenter, 7)).toBeDefined()
-            expect(lineNumberStateForScreenRow(presenter, 8)).toBeUndefined()
-
-            expectStateUpdate presenter, -> advanceClock(200)
-
-            expect(lineNumberStateForScreenRow(presenter, 0)).toBeUndefined()
-            expect(lineNumberStateForScreenRow(presenter, 1)).toBeUndefined()
-            expect(lineNumberStateForScreenRow(presenter, 7)).toBeDefined()
-            expect(lineNumberStateForScreenRow(presenter, 8)).toBeUndefined()
-
-          it "correctly handles the first screen line being soft-wrapped", ->
-            editor.setSoftWrapped(true)
-            editor.setEditorWidthInChars(30)
-            presenter = buildPresenter(explicitHeight: 25, scrollTop: 50)
-
-            expectValues lineNumberStateForScreenRow(presenter, 5), {screenRow: 5, bufferRow: 3, softWrapped: true}
-            expectValues lineNumberStateForScreenRow(presenter, 6), {screenRow: 6, bufferRow: 3, softWrapped: true}
-            expectValues lineNumberStateForScreenRow(presenter, 7), {screenRow: 7, bufferRow: 4, softWrapped: false}
-
-          describe ".decorationClasses", ->
-            it "adds decoration classes to the relevant line number state objects, both initially and when decorations change", ->
-              marker1 = editor.markBufferRange([[4, 0], [6, 2]], invalidate: 'touch')
-              decoration1 = editor.decorateMarker(marker1, type: 'line-number', class: 'a')
-              presenter = buildPresenter()
-              marker2 = editor.markBufferRange([[4, 0], [6, 2]], invalidate: 'touch')
-              decoration2 = editor.decorateMarker(marker2, type: 'line-number', class: 'b')
-
-              expect(lineNumberStateForScreenRow(presenter, 3).decorationClasses).toBeNull()
-              expect(lineNumberStateForScreenRow(presenter, 4).decorationClasses).toEqual ['a', 'b']
-              expect(lineNumberStateForScreenRow(presenter, 5).decorationClasses).toEqual ['a', 'b']
-              expect(lineNumberStateForScreenRow(presenter, 6).decorationClasses).toEqual ['a', 'b']
-              expect(lineNumberStateForScreenRow(presenter, 7).decorationClasses).toBeNull()
-
-              expectStateUpdate presenter, -> editor.getBuffer().insert([5, 0], 'x')
-              expect(marker1.isValid()).toBe false
-              expect(lineNumberStateForScreenRow(presenter, 4).decorationClasses).toBeNull()
-              expect(lineNumberStateForScreenRow(presenter, 5).decorationClasses).toBeNull()
-              expect(lineNumberStateForScreenRow(presenter, 6).decorationClasses).toBeNull()
-
-              expectStateUpdate presenter, -> editor.undo()
-              expect(lineNumberStateForScreenRow(presenter, 3).decorationClasses).toBeNull()
-              expect(lineNumberStateForScreenRow(presenter, 4).decorationClasses).toEqual ['a', 'b']
-              expect(lineNumberStateForScreenRow(presenter, 5).decorationClasses).toEqual ['a', 'b']
-              expect(lineNumberStateForScreenRow(presenter, 6).decorationClasses).toEqual ['a', 'b']
-              expect(lineNumberStateForScreenRow(presenter, 7).decorationClasses).toBeNull()
-
-              expectStateUpdate presenter, -> marker1.setBufferRange([[2, 0], [4, 2]])
-              expect(lineNumberStateForScreenRow(presenter, 1).decorationClasses).toBeNull()
-              expect(lineNumberStateForScreenRow(presenter, 2).decorationClasses).toEqual ['a']
-              expect(lineNumberStateForScreenRow(presenter, 3).decorationClasses).toEqual ['a']
-              expect(lineNumberStateForScreenRow(presenter, 4).decorationClasses).toEqual ['a', 'b']
-              expect(lineNumberStateForScreenRow(presenter, 5).decorationClasses).toEqual ['b']
-              expect(lineNumberStateForScreenRow(presenter, 6).decorationClasses).toEqual ['b']
-              expect(lineNumberStateForScreenRow(presenter, 7).decorationClasses).toBeNull()
-
-              expectStateUpdate presenter, -> decoration1.destroy()
-              expect(lineNumberStateForScreenRow(presenter, 2).decorationClasses).toBeNull()
-              expect(lineNumberStateForScreenRow(presenter, 3).decorationClasses).toBeNull()
-              expect(lineNumberStateForScreenRow(presenter, 4).decorationClasses).toEqual ['b']
-              expect(lineNumberStateForScreenRow(presenter, 5).decorationClasses).toEqual ['b']
-              expect(lineNumberStateForScreenRow(presenter, 6).decorationClasses).toEqual ['b']
-              expect(lineNumberStateForScreenRow(presenter, 7).decorationClasses).toBeNull()
-
-              expectStateUpdate presenter, -> marker2.destroy()
-              expect(lineNumberStateForScreenRow(presenter, 2).decorationClasses).toBeNull()
-              expect(lineNumberStateForScreenRow(presenter, 3).decorationClasses).toBeNull()
-              expect(lineNumberStateForScreenRow(presenter, 4).decorationClasses).toBeNull()
-              expect(lineNumberStateForScreenRow(presenter, 5).decorationClasses).toBeNull()
-              expect(lineNumberStateForScreenRow(presenter, 6).decorationClasses).toBeNull()
-              expect(lineNumberStateForScreenRow(presenter, 7).decorationClasses).toBeNull()
-
-            it "honors the 'onlyEmpty' option on line-number decorations", ->
-              presenter = buildPresenter()
-              marker = editor.markBufferRange([[4, 0], [6, 1]])
-              decoration = editor.decorateMarker(marker, type: 'line-number', class: 'a', onlyEmpty: true)
-
-              expect(lineNumberStateForScreenRow(presenter, 4).decorationClasses).toBeNull()
-              expect(lineNumberStateForScreenRow(presenter, 5).decorationClasses).toBeNull()
-              expect(lineNumberStateForScreenRow(presenter, 6).decorationClasses).toBeNull()
-
-              expectStateUpdate presenter, -> marker.clearTail()
-
-              expect(lineNumberStateForScreenRow(presenter, 4).decorationClasses).toBeNull()
-              expect(lineNumberStateForScreenRow(presenter, 5).decorationClasses).toBeNull()
-              expect(lineNumberStateForScreenRow(presenter, 6).decorationClasses).toEqual ['a']
-
-            it "honors the 'onlyNonEmpty' option on line-number decorations", ->
-              presenter = buildPresenter()
-              marker = editor.markBufferRange([[4, 0], [6, 2]])
-              decoration = editor.decorateMarker(marker, type: 'line-number', class: 'a', onlyNonEmpty: true)
-
-              expect(lineNumberStateForScreenRow(presenter, 4).decorationClasses).toEqual ['a']
-              expect(lineNumberStateForScreenRow(presenter, 5).decorationClasses).toEqual ['a']
-              expect(lineNumberStateForScreenRow(presenter, 6).decorationClasses).toEqual ['a']
-
-              expectStateUpdate presenter, -> marker.clearTail()
-
-              expect(lineNumberStateForScreenRow(presenter, 6).decorationClasses).toBeNull()
-
-            it "honors the 'onlyHead' option on line-number decorations", ->
-              presenter = buildPresenter()
-              marker = editor.markBufferRange([[4, 0], [6, 2]])
-              decoration = editor.decorateMarker(marker, type: 'line-number', class: 'a', onlyHead: true)
-
-              expect(lineNumberStateForScreenRow(presenter, 4).decorationClasses).toBeNull()
-              expect(lineNumberStateForScreenRow(presenter, 5).decorationClasses).toBeNull()
-              expect(lineNumberStateForScreenRow(presenter, 6).decorationClasses).toEqual ['a']
-
-            it "does not decorate the last line of a non-empty line-number decoration range if it ends at column 0", ->
-              presenter = buildPresenter()
-              marker = editor.markBufferRange([[4, 0], [6, 0]])
-              decoration = editor.decorateMarker(marker, type: 'line-number', class: 'a')
-
-              expect(lineNumberStateForScreenRow(presenter, 4).decorationClasses).toEqual ['a']
-              expect(lineNumberStateForScreenRow(presenter, 5).decorationClasses).toEqual ['a']
-              expect(lineNumberStateForScreenRow(presenter, 6).decorationClasses).toBeNull()
-
-            it "does not apply line-number decorations to mini editors", ->
-              editor.setMini(true)
-              presenter = buildPresenter()
-              marker = editor.markBufferRange([[0, 0], [0, 0]])
-              decoration = editor.decorateMarker(marker, type: 'line-number', class: 'a')
-              # A mini editor will have no gutters.
-              expect(getLineNumberGutterState(presenter)).toBeUndefined()
-
-              expectStateUpdate presenter, -> editor.setMini(false)
-              expect(lineNumberStateForScreenRow(presenter, 0).decorationClasses).toEqual ['cursor-line', 'cursor-line-no-selection', 'a']
-
-              expectStateUpdate presenter, -> editor.setMini(true)
-              expect(getLineNumberGutterState(presenter)).toBeUndefined()
-
-            it "only applies line-number decorations to screen rows that are spanned by their marker when lines are soft-wrapped", ->
-              editor.setText("a line that wraps, ok")
+          describe ".lineNumbers[id]", ->
+            it "contains states for line numbers that are visible on screen", ->
+              editor.foldBufferRow(4)
               editor.setSoftWrapped(true)
-              editor.setEditorWidthInChars(16)
-              marker = editor.markBufferRange([[0, 0], [0, 2]])
-              editor.decorateMarker(marker, type: 'line-number', class: 'a')
-              presenter = buildPresenter(explicitHeight: 10)
+              editor.setDefaultCharWidth(1)
+              editor.setEditorWidthInChars(50)
+              presenter = buildPresenter(explicitHeight: 25, scrollTop: 30, lineHeight: 10, tileSize: 2)
 
-              expect(lineNumberStateForScreenRow(presenter, 0).decorationClasses).toContain 'a'
-              expect(lineNumberStateForScreenRow(presenter, 1).decorationClasses).toBeNull()
+              expect(lineNumberStateForScreenRow(presenter, 1)).toBeUndefined()
+              expectValues lineNumberStateForScreenRow(presenter, 2), {screenRow: 2, bufferRow: 2, softWrapped: false}
+              expectValues lineNumberStateForScreenRow(presenter, 3), {screenRow: 3, bufferRow: 3, softWrapped: false}
+              expectValues lineNumberStateForScreenRow(presenter, 4), {screenRow: 4, bufferRow: 3, softWrapped: true}
+              expectValues lineNumberStateForScreenRow(presenter, 5), {screenRow: 5, bufferRow: 4, softWrapped: false}
+              expectValues lineNumberStateForScreenRow(presenter, 6), {screenRow: 6, bufferRow: 7, softWrapped: false}
+              expectValues lineNumberStateForScreenRow(presenter, 7), {screenRow: 7, bufferRow: 8, softWrapped: false}
+              expect(lineNumberStateForScreenRow(presenter, 8)).toBeUndefined()
 
-              marker.setBufferRange([[0, 0], [0, Infinity]])
-              expect(lineNumberStateForScreenRow(presenter, 0).decorationClasses).toContain 'a'
-              expect(lineNumberStateForScreenRow(presenter, 1).decorationClasses).toContain 'a'
+            it "updates when the editor's content changes", ->
+              editor.foldBufferRow(4)
+              editor.setSoftWrapped(true)
+              editor.setDefaultCharWidth(1)
+              editor.setEditorWidthInChars(50)
+              presenter = buildPresenter(explicitHeight: 35, scrollTop: 30, tileSize: 2)
 
-          describe ".foldable", ->
-            it "marks line numbers at the start of a foldable region as foldable", ->
-              presenter = buildPresenter()
-              expect(lineNumberStateForScreenRow(presenter, 0).foldable).toBe true
-              expect(lineNumberStateForScreenRow(presenter, 1).foldable).toBe true
-              expect(lineNumberStateForScreenRow(presenter, 2).foldable).toBe false
-              expect(lineNumberStateForScreenRow(presenter, 3).foldable).toBe false
-              expect(lineNumberStateForScreenRow(presenter, 4).foldable).toBe true
-              expect(lineNumberStateForScreenRow(presenter, 5).foldable).toBe false
+              expect(lineNumberStateForScreenRow(presenter, 1)).toBeUndefined()
+              expectValues lineNumberStateForScreenRow(presenter, 2), {bufferRow: 2}
+              expectValues lineNumberStateForScreenRow(presenter, 3), {bufferRow: 3}
+              expectValues lineNumberStateForScreenRow(presenter, 4), {bufferRow: 3}
+              expectValues lineNumberStateForScreenRow(presenter, 5), {bufferRow: 4}
+              expectValues lineNumberStateForScreenRow(presenter, 6), {bufferRow: 7}
+              expectValues lineNumberStateForScreenRow(presenter, 7), {bufferRow: 8}
+              expectValues lineNumberStateForScreenRow(presenter, 8), {bufferRow: 8}
+              expectValues lineNumberStateForScreenRow(presenter, 9), {bufferRow: 9}
+              expect(lineNumberStateForScreenRow(presenter, 10)).toBeUndefined()
 
-            it "updates the foldable class on the correct line numbers when the foldable positions change", ->
-              presenter = buildPresenter()
-              editor.getBuffer().insert([0, 0], '\n')
-              expect(lineNumberStateForScreenRow(presenter, 0).foldable).toBe false
-              expect(lineNumberStateForScreenRow(presenter, 1).foldable).toBe true
-              expect(lineNumberStateForScreenRow(presenter, 2).foldable).toBe true
-              expect(lineNumberStateForScreenRow(presenter, 3).foldable).toBe false
-              expect(lineNumberStateForScreenRow(presenter, 4).foldable).toBe false
-              expect(lineNumberStateForScreenRow(presenter, 5).foldable).toBe true
-              expect(lineNumberStateForScreenRow(presenter, 6).foldable).toBe false
+              expectStateUpdate presenter, ->
+                editor.getBuffer().insert([3, Infinity], new Array(25).join("x "))
 
-            it "updates the foldable class on a line number that becomes foldable", ->
-              presenter = buildPresenter()
-              expect(lineNumberStateForScreenRow(presenter, 11).foldable).toBe false
+              expect(lineNumberStateForScreenRow(presenter, 1)).toBeUndefined()
+              expectValues lineNumberStateForScreenRow(presenter, 2), {bufferRow: 2}
+              expectValues lineNumberStateForScreenRow(presenter, 3), {bufferRow: 3}
+              expectValues lineNumberStateForScreenRow(presenter, 4), {bufferRow: 3}
+              expectValues lineNumberStateForScreenRow(presenter, 5), {bufferRow: 3}
+              expectValues lineNumberStateForScreenRow(presenter, 6), {bufferRow: 4}
+              expectValues lineNumberStateForScreenRow(presenter, 7), {bufferRow: 7}
+              expectValues lineNumberStateForScreenRow(presenter, 8), {bufferRow: 8}
+              expectValues lineNumberStateForScreenRow(presenter, 9), {bufferRow: 8}
+              expect(lineNumberStateForScreenRow(presenter, 10)).toBeUndefined()
 
-              editor.getBuffer().insert([11, 44], '\n    fold me')
-              expect(lineNumberStateForScreenRow(presenter, 11).foldable).toBe true
+            it "correctly handles the first screen line being soft-wrapped", ->
+              editor.setSoftWrapped(true)
+              editor.setDefaultCharWidth(1)
+              editor.setEditorWidthInChars(30)
+              presenter = buildPresenter(explicitHeight: 25, scrollTop: 50, tileSize: 2)
 
-              editor.undo()
-              expect(lineNumberStateForScreenRow(presenter, 11).foldable).toBe false
+              expectValues lineNumberStateForScreenRow(presenter, 5), {screenRow: 5, bufferRow: 3, softWrapped: true}
+              expectValues lineNumberStateForScreenRow(presenter, 6), {screenRow: 6, bufferRow: 3, softWrapped: true}
+              expectValues lineNumberStateForScreenRow(presenter, 7), {screenRow: 7, bufferRow: 4, softWrapped: false}
+
+              presenter.setContentFrameWidth(500)
+
+              expectValues lineNumberStateForScreenRow(presenter, 5), {screenRow: 5, bufferRow: 4, softWrapped: false}
+              expectValues lineNumberStateForScreenRow(presenter, 6), {screenRow: 6, bufferRow: 5, softWrapped: false}
+              expectValues lineNumberStateForScreenRow(presenter, 7), {screenRow: 7, bufferRow: 6, softWrapped: false}
+
+            describe ".decorationClasses", ->
+              it "adds decoration classes to the relevant line number state objects, both initially and when decorations change", ->
+                marker1 = editor.addMarkerLayer(maintainHistory: true).markBufferRange([[4, 0], [6, 2]], invalidate: 'touch')
+                decoration1 = editor.decorateMarker(marker1, type: 'line-number', class: 'a')
+                marker2 = editor.addMarkerLayer(maintainHistory: true).markBufferRange([[4, 0], [6, 2]], invalidate: 'touch')
+                decoration2 = editor.decorateMarker(marker2, type: 'line-number', class: 'b')
+                presenter = buildPresenter()
+
+                expect(lineNumberStateForScreenRow(presenter, 3).decorationClasses).toBeNull()
+                expect(lineNumberStateForScreenRow(presenter, 4).decorationClasses).toEqual ['a', 'b']
+                expect(lineNumberStateForScreenRow(presenter, 5).decorationClasses).toEqual ['a', 'b']
+                expect(lineNumberStateForScreenRow(presenter, 6).decorationClasses).toEqual ['a', 'b']
+                expect(lineNumberStateForScreenRow(presenter, 7).decorationClasses).toBeNull()
+
+                waitsForStateToUpdate presenter, -> editor.getBuffer().insert([5, 0], 'x')
+                runs ->
+                  expect(marker1.isValid()).toBe false
+                  expect(lineNumberStateForScreenRow(presenter, 4).decorationClasses).toBeNull()
+                  expect(lineNumberStateForScreenRow(presenter, 5).decorationClasses).toBeNull()
+                  expect(lineNumberStateForScreenRow(presenter, 6).decorationClasses).toBeNull()
+
+                waitsForStateToUpdate presenter, -> editor.undo()
+                runs ->
+                  expect(lineNumberStateForScreenRow(presenter, 3).decorationClasses).toBeNull()
+                  expect(lineNumberStateForScreenRow(presenter, 4).decorationClasses).toEqual ['a', 'b']
+                  expect(lineNumberStateForScreenRow(presenter, 5).decorationClasses).toEqual ['a', 'b']
+                  expect(lineNumberStateForScreenRow(presenter, 6).decorationClasses).toEqual ['a', 'b']
+                  expect(lineNumberStateForScreenRow(presenter, 7).decorationClasses).toBeNull()
+
+                waitsForStateToUpdate presenter, -> marker1.setBufferRange([[2, 0], [4, 2]])
+                runs ->
+                  expect(lineNumberStateForScreenRow(presenter, 1).decorationClasses).toBeNull()
+                  expect(lineNumberStateForScreenRow(presenter, 2).decorationClasses).toEqual ['a']
+                  expect(lineNumberStateForScreenRow(presenter, 3).decorationClasses).toEqual ['a']
+                  expect(lineNumberStateForScreenRow(presenter, 4).decorationClasses).toEqual ['a', 'b']
+                  expect(lineNumberStateForScreenRow(presenter, 5).decorationClasses).toEqual ['b']
+                  expect(lineNumberStateForScreenRow(presenter, 6).decorationClasses).toEqual ['b']
+                  expect(lineNumberStateForScreenRow(presenter, 7).decorationClasses).toBeNull()
+
+                waitsForStateToUpdate presenter, -> decoration1.destroy()
+                runs ->
+                  expect(lineNumberStateForScreenRow(presenter, 2).decorationClasses).toBeNull()
+                  expect(lineNumberStateForScreenRow(presenter, 3).decorationClasses).toBeNull()
+                  expect(lineNumberStateForScreenRow(presenter, 4).decorationClasses).toEqual ['b']
+                  expect(lineNumberStateForScreenRow(presenter, 5).decorationClasses).toEqual ['b']
+                  expect(lineNumberStateForScreenRow(presenter, 6).decorationClasses).toEqual ['b']
+                  expect(lineNumberStateForScreenRow(presenter, 7).decorationClasses).toBeNull()
+
+                waitsForStateToUpdate presenter, -> marker2.destroy()
+                runs ->
+                  expect(lineNumberStateForScreenRow(presenter, 2).decorationClasses).toBeNull()
+                  expect(lineNumberStateForScreenRow(presenter, 3).decorationClasses).toBeNull()
+                  expect(lineNumberStateForScreenRow(presenter, 4).decorationClasses).toBeNull()
+                  expect(lineNumberStateForScreenRow(presenter, 5).decorationClasses).toBeNull()
+                  expect(lineNumberStateForScreenRow(presenter, 6).decorationClasses).toBeNull()
+                  expect(lineNumberStateForScreenRow(presenter, 7).decorationClasses).toBeNull()
+
+              it "honors the 'onlyEmpty' option on line-number decorations", ->
+                marker = editor.markBufferRange([[4, 0], [6, 1]])
+                decoration = editor.decorateMarker(marker, type: 'line-number', class: 'a', onlyEmpty: true)
+                presenter = buildPresenter()
+
+                expect(lineNumberStateForScreenRow(presenter, 4).decorationClasses).toBeNull()
+                expect(lineNumberStateForScreenRow(presenter, 5).decorationClasses).toBeNull()
+                expect(lineNumberStateForScreenRow(presenter, 6).decorationClasses).toBeNull()
+
+                waitsForStateToUpdate presenter, -> marker.clearTail()
+
+                runs ->
+                  expect(lineNumberStateForScreenRow(presenter, 4).decorationClasses).toBeNull()
+                  expect(lineNumberStateForScreenRow(presenter, 5).decorationClasses).toBeNull()
+                  expect(lineNumberStateForScreenRow(presenter, 6).decorationClasses).toEqual ['a']
+
+              it "honors the 'onlyNonEmpty' option on line-number decorations", ->
+                marker = editor.markBufferRange([[4, 0], [6, 2]])
+                decoration = editor.decorateMarker(marker, type: 'line-number', class: 'a', onlyNonEmpty: true)
+                presenter = buildPresenter()
+
+                expect(lineNumberStateForScreenRow(presenter, 4).decorationClasses).toEqual ['a']
+                expect(lineNumberStateForScreenRow(presenter, 5).decorationClasses).toEqual ['a']
+                expect(lineNumberStateForScreenRow(presenter, 6).decorationClasses).toEqual ['a']
+
+                waitsForStateToUpdate presenter, -> marker.clearTail()
+
+                runs ->
+                  expect(lineNumberStateForScreenRow(presenter, 6).decorationClasses).toBeNull()
+
+              it "honors the 'onlyHead' option on line-number decorations", ->
+                marker = editor.markBufferRange([[4, 0], [6, 2]])
+                decoration = editor.decorateMarker(marker, type: 'line-number', class: 'a', onlyHead: true)
+                presenter = buildPresenter()
+
+                expect(lineNumberStateForScreenRow(presenter, 4).decorationClasses).toBeNull()
+                expect(lineNumberStateForScreenRow(presenter, 5).decorationClasses).toBeNull()
+                expect(lineNumberStateForScreenRow(presenter, 6).decorationClasses).toEqual ['a']
+
+              it "does not decorate the last line of a non-empty line-number decoration range if it ends at column 0", ->
+                marker = editor.markBufferRange([[4, 0], [6, 0]])
+                decoration = editor.decorateMarker(marker, type: 'line-number', class: 'a')
+                presenter = buildPresenter()
+
+                expect(lineNumberStateForScreenRow(presenter, 4).decorationClasses).toEqual ['a']
+                expect(lineNumberStateForScreenRow(presenter, 5).decorationClasses).toEqual ['a']
+                expect(lineNumberStateForScreenRow(presenter, 6).decorationClasses).toBeNull()
+
+              it "does not apply line-number decorations to mini editors", ->
+                editor.setMini(true)
+                presenter = buildPresenter()
+                marker = editor.markBufferRange([[0, 0], [0, 0]])
+                decoration = editor.decorateMarker(marker, type: 'line-number', class: 'a')
+                # A mini editor will have no gutters.
+                expect(getLineNumberGutterState(presenter)).toBeUndefined()
+
+                expectStateUpdate presenter, -> editor.setMini(false)
+                expect(lineNumberStateForScreenRow(presenter, 0).decorationClasses).toEqual ['cursor-line', 'cursor-line-no-selection', 'a']
+
+                expectStateUpdate presenter, -> editor.setMini(true)
+                expect(getLineNumberGutterState(presenter)).toBeUndefined()
+
+              it "only applies line-number decorations to screen rows that are spanned by their marker when lines are soft-wrapped", ->
+                editor.setText("a line that wraps, ok")
+                editor.setSoftWrapped(true)
+                editor.setDefaultCharWidth(1)
+                editor.setEditorWidthInChars(16)
+                marker = editor.markBufferRange([[0, 0], [0, 2]])
+                editor.decorateMarker(marker, type: 'line-number', class: 'a')
+                presenter = buildPresenter(explicitHeight: 10)
+
+                expect(lineNumberStateForScreenRow(presenter, 0).decorationClasses).toContain 'a'
+                expect(lineNumberStateForScreenRow(presenter, 1).decorationClasses).toBeNull()
+
+                waitsForStateToUpdate presenter, -> marker.setBufferRange([[0, 0], [0, Infinity]])
+                runs ->
+                  expect(lineNumberStateForScreenRow(presenter, 0).decorationClasses).toContain 'a'
+                  expect(lineNumberStateForScreenRow(presenter, 1).decorationClasses).toContain 'a'
+
+            describe ".foldable", ->
+              it "marks line numbers at the start of a foldable region as foldable", ->
+                presenter = buildPresenter()
+                expect(lineNumberStateForScreenRow(presenter, 0).foldable).toBe true
+                expect(lineNumberStateForScreenRow(presenter, 1).foldable).toBe true
+                expect(lineNumberStateForScreenRow(presenter, 2).foldable).toBe false
+                expect(lineNumberStateForScreenRow(presenter, 3).foldable).toBe false
+                expect(lineNumberStateForScreenRow(presenter, 4).foldable).toBe true
+                expect(lineNumberStateForScreenRow(presenter, 5).foldable).toBe false
+
+              it "updates the foldable class on the correct line numbers when the foldable positions change", ->
+                presenter = buildPresenter()
+                editor.getBuffer().insert([0, 0], '\n')
+                expect(lineNumberStateForScreenRow(presenter, 0).foldable).toBe false
+                expect(lineNumberStateForScreenRow(presenter, 1).foldable).toBe true
+                expect(lineNumberStateForScreenRow(presenter, 2).foldable).toBe true
+                expect(lineNumberStateForScreenRow(presenter, 3).foldable).toBe false
+                expect(lineNumberStateForScreenRow(presenter, 4).foldable).toBe false
+                expect(lineNumberStateForScreenRow(presenter, 5).foldable).toBe true
+                expect(lineNumberStateForScreenRow(presenter, 6).foldable).toBe false
+
+              it "updates the foldable class on a line number that becomes foldable", ->
+                presenter = buildPresenter()
+                expect(lineNumberStateForScreenRow(presenter, 11).foldable).toBe false
+
+                editor.getBuffer().insert([11, 44], '\n    fold me')
+                expect(lineNumberStateForScreenRow(presenter, 11).foldable).toBe true
+
+                editor.undo()
+                expect(lineNumberStateForScreenRow(presenter, 11).foldable).toBe false
 
       describe "for a gutter description that corresponds to a custom gutter", ->
         describe ".content", ->
@@ -2213,12 +2593,11 @@ describe "TextEditorPresenter", ->
           scrollTop = 0
           lineHeight = 10
           explicitHeight = lineHeight * 10
-          lineOverdrawMargin = 1
 
           beforeEach ->
             # At the beginning of each test, decoration1 and decoration2 are in visible range,
             # but not decoration3.
-            presenter = buildPresenter({explicitHeight, scrollTop, lineHeight, lineOverdrawMargin})
+            presenter = buildPresenter({explicitHeight, scrollTop, lineHeight})
             gutter = editor.addGutter({name: 'test-gutter', visible: true})
             decorationItem = document.createElement('div')
             decorationItem.class = 'decoration-item'
@@ -2227,11 +2606,11 @@ describe "TextEditorPresenter", ->
               gutterName: 'test-gutter'
               class: 'test-class'
               item: decorationItem
-            marker1 = editor.markBufferRange([[0,0],[1,0]])
+            marker1 = editor.markBufferRange([[0, 0], [1, 0]])
             decoration1 = editor.decorateMarker(marker1, decorationParams)
-            marker2 = editor.markBufferRange([[9,0],[12,0]])
+            marker2 = editor.markBufferRange([[9, 0], [12, 0]])
             decoration2 = editor.decorateMarker(marker2, decorationParams)
-            marker3 = editor.markBufferRange([[13,0],[14,0]])
+            marker3 = editor.markBufferRange([[13, 0], [14, 0]])
             decoration3 = editor.decorateMarker(marker3, decorationParams)
 
             # Clear any batched state updates.
@@ -2250,6 +2629,17 @@ describe "TextEditorPresenter", ->
             expect(decorationState[decoration2.id].class).toBe 'test-class'
 
             expect(decorationState[decoration3.id]).toBeUndefined()
+
+          it "updates all the gutters, even when a gutter with higher priority is hidden", ->
+            hiddenGutter = {name: 'test-gutter-1', priority: -150, visible: false}
+            editor.addGutter(hiddenGutter)
+
+            # This update will scroll decoration1 out of view, and decoration3 into view.
+            expectStateUpdate presenter, -> presenter.setScrollTop(scrollTop + lineHeight * 5)
+
+            decorationState = getContentForGutterWithName(presenter, 'test-gutter')
+            expect(decorationState[decoration1.id]).toBeUndefined()
+            expect(decorationState[decoration3.id].top).toBeDefined()
 
           it "updates when ::scrollTop changes", ->
             # This update will scroll decoration1 out of view, and decoration3 into view.
@@ -2280,7 +2670,7 @@ describe "TextEditorPresenter", ->
 
           it "updates when the editor's content changes", ->
             # This update will add enough lines to push decoration2 out of view.
-            expectStateUpdate presenter, -> editor.setTextInBufferRange([[8,0],[9,0]],'\n\n\n\n\n')
+            expectStateUpdate presenter, -> editor.setTextInBufferRange([[8, 0], [9, 0]], '\n\n\n\n\n')
 
             decorationState = getContentForGutterWithName(presenter, 'test-gutter')
             expect(decorationState[decoration1.id].top).toBeDefined()
@@ -2289,14 +2679,15 @@ describe "TextEditorPresenter", ->
 
           it "updates when a decoration's marker is modified", ->
             # This update will move decoration1 out of view.
-            expectStateUpdate presenter, ->
-              newRange = new Range([13,0],[14,0])
+            waitsForStateToUpdate presenter, ->
+              newRange = new Range([13, 0], [14, 0])
               marker1.setBufferRange(newRange)
 
-            decorationState = getContentForGutterWithName(presenter, 'test-gutter')
-            expect(decorationState[decoration1.id]).toBeUndefined()
-            expect(decorationState[decoration2.id].top).toBeDefined()
-            expect(decorationState[decoration3.id]).toBeUndefined()
+            runs ->
+              decorationState = getContentForGutterWithName(presenter, 'test-gutter')
+              expect(decorationState[decoration1.id]).toBeUndefined()
+              expect(decorationState[decoration2.id].top).toBeDefined()
+              expect(decorationState[decoration3.id]).toBeUndefined()
 
           describe "when a decoration's properties are modified", ->
             it "updates the item applied to the decoration, if the decoration item is changed", ->
@@ -2308,12 +2699,14 @@ describe "TextEditorPresenter", ->
                 gutterName: 'test-gutter'
                 class: 'test-class'
                 item: newItem
-              expectStateUpdate presenter, -> decoration1.setProperties(newDecorationParams)
 
-              decorationState = getContentForGutterWithName(presenter, 'test-gutter')
-              expect(decorationState[decoration1.id].item).toBe newItem
-              expect(decorationState[decoration2.id].item).toBe decorationItem
-              expect(decorationState[decoration3.id]).toBeUndefined()
+              waitsForStateToUpdate presenter, -> decoration1.setProperties(newDecorationParams)
+
+              runs ->
+                decorationState = getContentForGutterWithName(presenter, 'test-gutter')
+                expect(decorationState[decoration1.id].item).toBe newItem
+                expect(decorationState[decoration2.id].item).toBe decorationItem
+                expect(decorationState[decoration3.id]).toBeUndefined()
 
             it "updates the class applied to the decoration, if the decoration class is changed", ->
               # This changes the decoration item. The visibility of the decoration should not be affected.
@@ -2322,12 +2715,13 @@ describe "TextEditorPresenter", ->
                 gutterName: 'test-gutter'
                 class: 'new-test-class'
                 item: decorationItem
-              expectStateUpdate presenter, -> decoration1.setProperties(newDecorationParams)
+              waitsForStateToUpdate presenter, -> decoration1.setProperties(newDecorationParams)
 
-              decorationState = getContentForGutterWithName(presenter, 'test-gutter')
-              expect(decorationState[decoration1.id].class).toBe 'new-test-class'
-              expect(decorationState[decoration2.id].class).toBe 'test-class'
-              expect(decorationState[decoration3.id]).toBeUndefined()
+              runs ->
+                decorationState = getContentForGutterWithName(presenter, 'test-gutter')
+                expect(decorationState[decoration1.id].class).toBe 'new-test-class'
+                expect(decorationState[decoration2.id].class).toBe 'test-class'
+                expect(decorationState[decoration3.id]).toBeUndefined()
 
             it "updates the type of the decoration, if the decoration type is changed", ->
               # This changes the type of the decoration. This should remove the decoration from the gutter.
@@ -2336,12 +2730,13 @@ describe "TextEditorPresenter", ->
                 gutterName: 'test-gutter' # This is an invalid/meaningless option here, but it shouldn't matter.
                 class: 'test-class'
                 item: decorationItem
-              expectStateUpdate presenter, -> decoration1.setProperties(newDecorationParams)
+              waitsForStateToUpdate presenter, -> decoration1.setProperties(newDecorationParams)
 
-              decorationState = getContentForGutterWithName(presenter, 'test-gutter')
-              expect(decorationState[decoration1.id]).toBeUndefined()
-              expect(decorationState[decoration2.id].top).toBeDefined()
-              expect(decorationState[decoration3.id]).toBeUndefined()
+              runs ->
+                decorationState = getContentForGutterWithName(presenter, 'test-gutter')
+                expect(decorationState[decoration1.id]).toBeUndefined()
+                expect(decorationState[decoration2.id].top).toBeDefined()
+                expect(decorationState[decoration3.id]).toBeUndefined()
 
             it "updates the gutter the decoration targets, if the decoration gutterName is changed", ->
               # This changes which gutter this decoration applies to. Since this gutter does not exist,
@@ -2351,24 +2746,25 @@ describe "TextEditorPresenter", ->
                 gutterName: 'test-gutter-2'
                 class: 'new-test-class'
                 item: decorationItem
-              expectStateUpdate presenter, -> decoration1.setProperties(newDecorationParams)
+              waitsForStateToUpdate presenter, -> decoration1.setProperties(newDecorationParams)
 
-              decorationState = getContentForGutterWithName(presenter, 'test-gutter')
-              expect(decorationState[decoration1.id]).toBeUndefined()
-              expect(decorationState[decoration2.id].top).toBeDefined()
-              expect(decorationState[decoration3.id]).toBeUndefined()
+              runs ->
+                decorationState = getContentForGutterWithName(presenter, 'test-gutter')
+                expect(decorationState[decoration1.id]).toBeUndefined()
+                expect(decorationState[decoration2.id].top).toBeDefined()
+                expect(decorationState[decoration3.id]).toBeUndefined()
 
-              # After adding the targeted gutter, the decoration will appear in the state for that gutter,
-              # since it should be visible.
-              expectStateUpdate presenter, -> editor.addGutter({name: 'test-gutter-2'})
-              newGutterDecorationState = getContentForGutterWithName(presenter, 'test-gutter-2')
-              expect(newGutterDecorationState[decoration1.id].top).toBeDefined()
-              expect(newGutterDecorationState[decoration2.id]).toBeUndefined()
-              expect(newGutterDecorationState[decoration3.id]).toBeUndefined()
-              oldGutterDecorationState = getContentForGutterWithName(presenter, 'test-gutter')
-              expect(oldGutterDecorationState[decoration1.id]).toBeUndefined()
-              expect(oldGutterDecorationState[decoration2.id].top).toBeDefined()
-              expect(oldGutterDecorationState[decoration3.id]).toBeUndefined()
+                # After adding the targeted gutter, the decoration will appear in the state for that gutter,
+                # since it should be visible.
+                expectStateUpdate presenter, -> editor.addGutter({name: 'test-gutter-2'})
+                newGutterDecorationState = getContentForGutterWithName(presenter, 'test-gutter-2')
+                expect(newGutterDecorationState[decoration1.id].top).toBeDefined()
+                expect(newGutterDecorationState[decoration2.id]).toBeUndefined()
+                expect(newGutterDecorationState[decoration3.id]).toBeUndefined()
+                oldGutterDecorationState = getContentForGutterWithName(presenter, 'test-gutter')
+                expect(oldGutterDecorationState[decoration1.id]).toBeUndefined()
+                expect(oldGutterDecorationState[decoration2.id].top).toBeDefined()
+                expect(oldGutterDecorationState[decoration3.id]).toBeUndefined()
 
           it "updates when the editor's mini state changes, and is cleared when the editor is mini", ->
             expectStateUpdate presenter, -> editor.setMini(true)
@@ -2401,15 +2797,19 @@ describe "TextEditorPresenter", ->
               type: 'gutter'
               gutterName: 'test-gutter-2'
               class: 'test-class'
-            marker4 = editor.markBufferRange([[0,0],[1,0]])
+            marker4 = editor.markBufferRange([[0, 0], [1, 0]])
             decoration4 = editor.decorateMarker(marker4, decorationParams)
-            expectStateUpdate presenter, -> editor.addGutter({name: 'test-gutter-2'})
 
-            decorationState = getContentForGutterWithName(presenter, 'test-gutter-2')
-            expect(decorationState[decoration1.id]).toBeUndefined()
-            expect(decorationState[decoration2.id]).toBeUndefined()
-            expect(decorationState[decoration3.id]).toBeUndefined()
-            expect(decorationState[decoration4.id].top).toBeDefined()
+            waitsForStateToUpdate presenter
+
+            runs ->
+              expectStateUpdate presenter, -> editor.addGutter({name: 'test-gutter-2'})
+
+              decorationState = getContentForGutterWithName(presenter, 'test-gutter-2')
+              expect(decorationState[decoration1.id]).toBeUndefined()
+              expect(decorationState[decoration2.id]).toBeUndefined()
+              expect(decorationState[decoration3.id]).toBeUndefined()
+              expect(decorationState[decoration4.id].top).toBeDefined()
 
           it "updates when editor lines are folded", ->
             oldDimensionsForDecoration1 =
@@ -2543,7 +2943,9 @@ describe "TextEditorPresenter", ->
 
         describe ".backgroundColor", ->
           it "is assigned to ::gutterBackgroundColor if present, and to ::backgroundColor otherwise", ->
-            presenter = buildPresenter(backgroundColor: "rgba(255, 0, 0, 0)", gutterBackgroundColor: "rgba(0, 255, 0, 0)")
+            presenter = buildPresenter()
+            presenter.setBackgroundColor("rgba(255, 0, 0, 0)")
+            presenter.setGutterBackgroundColor("rgba(0, 255, 0, 0)")
             expect(getStylesForGutterWithName(presenter, 'line-number').backgroundColor).toBe "rgba(0, 255, 0, 0)"
             expect(getStylesForGutterWithName(presenter, 'test-gutter').backgroundColor).toBe "rgba(0, 255, 0, 0)"
 
@@ -2585,11 +2987,11 @@ describe "TextEditorPresenter", ->
 
     performSetup = ->
       buffer = new TextBuffer
-      editor = new TextEditor({buffer})
+      editor = atom.workspace.buildTextEditor({buffer})
       editor.setEditorWidthInChars(80)
       presenterParams =
         model: editor
-        lineOverdrawMargin: 1
+
       presenter = new TextEditorPresenter(presenterParams)
       statements = []
 

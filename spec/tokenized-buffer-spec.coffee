@@ -27,7 +27,9 @@ describe "TokenizedBuffer", ->
   describe "when the buffer is destroyed", ->
     beforeEach ->
       buffer = atom.project.bufferForPathSync('sample.js')
-      tokenizedBuffer = new TokenizedBuffer({buffer})
+      tokenizedBuffer = new TokenizedBuffer({
+        buffer, config: atom.config, grammarRegistry: atom.grammars, packageManager: atom.packages, assert: atom.assert
+      })
       startTokenizing(tokenizedBuffer)
 
     it "stops tokenization", ->
@@ -39,7 +41,9 @@ describe "TokenizedBuffer", ->
   describe "when the buffer contains soft-tabs", ->
     beforeEach ->
       buffer = atom.project.bufferForPathSync('sample.js')
-      tokenizedBuffer = new TokenizedBuffer({buffer})
+      tokenizedBuffer = new TokenizedBuffer({
+        buffer, config: atom.config, grammarRegistry: atom.grammars, packageManager: atom.packages, assert: atom.assert
+      })
       startTokenizing(tokenizedBuffer)
       tokenizedBuffer.onDidChange changeHandler = jasmine.createSpy('changeHandler')
 
@@ -150,7 +154,7 @@ describe "TokenizedBuffer", ->
           it "updates tokens to reflect the change", ->
             buffer.setTextInRange([[0, 0], [2, 0]], "foo()\n7\n")
 
-            expect(tokenizedBuffer.tokenizedLineForRow(0).tokens[1]).toEqual(value: '(', scopes: ['source.js', 'meta.brace.round.js'])
+            expect(tokenizedBuffer.tokenizedLineForRow(0).tokens[1]).toEqual(value: '(', scopes: ['source.js', 'meta.function-call.js', 'punctuation.definition.arguments.begin.js'])
             expect(tokenizedBuffer.tokenizedLineForRow(1).tokens[0]).toEqual(value: '7', scopes: ['source.js', 'constant.numeric.js'])
             # line 2 is unchanged
             expect(tokenizedBuffer.tokenizedLineForRow(2).tokens[2]).toEqual(value: 'if', scopes: ['source.js', 'keyword.control.js'])
@@ -194,16 +198,16 @@ describe "TokenizedBuffer", ->
             buffer.setTextInRange([[1, 0], [3, 0]], "foo()")
 
             # previous line 0 remains
-            expect(tokenizedBuffer.tokenizedLineForRow(0).tokens[0]).toEqual(value: 'var', scopes: ['source.js', 'storage.modifier.js'])
+            expect(tokenizedBuffer.tokenizedLineForRow(0).tokens[0]).toEqual(value: 'var', scopes: ['source.js', 'storage.type.var.js'])
 
             # previous line 3 should be combined with input to form line 1
-            expect(tokenizedBuffer.tokenizedLineForRow(1).tokens[0]).toEqual(value: 'foo', scopes: ['source.js'])
-            expect(tokenizedBuffer.tokenizedLineForRow(1).tokens[6]).toEqual(value: '=', scopes: ['source.js', 'keyword.operator.js'])
+            expect(tokenizedBuffer.tokenizedLineForRow(1).tokens[0]).toEqual(value: 'foo', scopes: ['source.js', 'meta.function-call.js', 'entity.name.function.js'])
+            expect(tokenizedBuffer.tokenizedLineForRow(1).tokens[6]).toEqual(value: '=', scopes: ['source.js', 'keyword.operator.assignment.js'])
 
             # lines below deleted regions should be shifted upward
             expect(tokenizedBuffer.tokenizedLineForRow(2).tokens[2]).toEqual(value: 'while', scopes: ['source.js', 'keyword.control.js'])
-            expect(tokenizedBuffer.tokenizedLineForRow(3).tokens[4]).toEqual(value: '=', scopes: ['source.js', 'keyword.operator.js'])
-            expect(tokenizedBuffer.tokenizedLineForRow(4).tokens[4]).toEqual(value: '<', scopes: ['source.js', 'keyword.operator.js'])
+            expect(tokenizedBuffer.tokenizedLineForRow(3).tokens[4]).toEqual(value: '=', scopes: ['source.js', 'keyword.operator.assignment.js'])
+            expect(tokenizedBuffer.tokenizedLineForRow(4).tokens[4]).toEqual(value: '<', scopes: ['source.js', 'keyword.operator.comparison.js'])
 
             expect(changeHandler).toHaveBeenCalled()
             [event] = changeHandler.argsForCall[0]
@@ -238,19 +242,19 @@ describe "TokenizedBuffer", ->
             buffer.setTextInRange([[1, 0], [2, 0]], "foo()\nbar()\nbaz()\nquux()")
 
             # previous line 0 remains
-            expect(tokenizedBuffer.tokenizedLineForRow(0).tokens[0]).toEqual( value: 'var', scopes: ['source.js', 'storage.modifier.js'])
+            expect(tokenizedBuffer.tokenizedLineForRow(0).tokens[0]).toEqual( value: 'var', scopes: ['source.js', 'storage.type.var.js'])
 
             # 3 new lines inserted
-            expect(tokenizedBuffer.tokenizedLineForRow(1).tokens[0]).toEqual(value: 'foo', scopes: ['source.js'])
-            expect(tokenizedBuffer.tokenizedLineForRow(2).tokens[0]).toEqual(value: 'bar', scopes: ['source.js'])
-            expect(tokenizedBuffer.tokenizedLineForRow(3).tokens[0]).toEqual(value: 'baz', scopes: ['source.js'])
+            expect(tokenizedBuffer.tokenizedLineForRow(1).tokens[0]).toEqual(value: 'foo', scopes: ['source.js', 'meta.function-call.js', 'entity.name.function.js'])
+            expect(tokenizedBuffer.tokenizedLineForRow(2).tokens[0]).toEqual(value: 'bar', scopes: ['source.js', 'meta.function-call.js', 'entity.name.function.js'])
+            expect(tokenizedBuffer.tokenizedLineForRow(3).tokens[0]).toEqual(value: 'baz', scopes: ['source.js', 'meta.function-call.js', 'entity.name.function.js'])
 
             # previous line 2 is joined with quux() on line 4
-            expect(tokenizedBuffer.tokenizedLineForRow(4).tokens[0]).toEqual(value: 'quux', scopes: ['source.js'])
+            expect(tokenizedBuffer.tokenizedLineForRow(4).tokens[0]).toEqual(value: 'quux', scopes: ['source.js', 'meta.function-call.js', 'entity.name.function.js'])
             expect(tokenizedBuffer.tokenizedLineForRow(4).tokens[4]).toEqual(value: 'if', scopes: ['source.js', 'keyword.control.js'])
 
             # previous line 3 is pushed down to become line 5
-            expect(tokenizedBuffer.tokenizedLineForRow(5).tokens[4]).toEqual(value: '=', scopes: ['source.js', 'keyword.operator.js'])
+            expect(tokenizedBuffer.tokenizedLineForRow(5).tokens[4]).toEqual(value: '=', scopes: ['source.js', 'keyword.operator.assignment.js'])
 
             expect(changeHandler).toHaveBeenCalled()
             [event] = changeHandler.argsForCall[0]
@@ -287,7 +291,7 @@ describe "TokenizedBuffer", ->
       describe "when there is an insertion that is larger than the chunk size", ->
         it "tokenizes the initial chunk synchronously, then tokenizes the remaining lines in the background", ->
           commentBlock = _.multiplyString("// a comment\n", tokenizedBuffer.chunkSize + 2)
-          buffer.insert([0,0], commentBlock)
+          buffer.insert([0, 0], commentBlock)
           expect(tokenizedBuffer.tokenizedLineForRow(0).ruleStack?).toBeTruthy()
           expect(tokenizedBuffer.tokenizedLineForRow(4).ruleStack?).toBeTruthy()
           expect(tokenizedBuffer.tokenizedLineForRow(5).ruleStack?).toBeFalsy()
@@ -322,6 +326,22 @@ describe "TokenizedBuffer", ->
         expect(tokens[2].value).toBe " \u030b"
         expect(tokens[2].hasLeadingWhitespace()).toBe false
 
+      it "does not break out soft tabs across a scope boundary", ->
+        waitsForPromise ->
+          atom.packages.activatePackage('language-gfm')
+
+        runs ->
+          tokenizedBuffer.setTabLength(4)
+          tokenizedBuffer.setGrammar(atom.grammars.selectGrammar('.md'))
+          buffer.setText('    <![]()\n    ')
+          fullyTokenize(tokenizedBuffer)
+
+          length = 0
+          for tag in tokenizedBuffer.tokenizedLines[1].tags
+            length += tag if tag > 0
+
+          expect(length).toBe 4
+
   describe "when the buffer contains hard-tabs", ->
     beforeEach ->
       waitsForPromise ->
@@ -329,7 +349,9 @@ describe "TokenizedBuffer", ->
 
       runs ->
         buffer = atom.project.bufferForPathSync('sample-with-tabs.coffee')
-        tokenizedBuffer = new TokenizedBuffer({buffer})
+        tokenizedBuffer = new TokenizedBuffer({
+          buffer, config: atom.config, grammarRegistry: atom.grammars, packageManager: atom.packages, assert: atom.assert
+        })
         startTokenizing(tokenizedBuffer)
 
     afterEach ->
@@ -434,7 +456,9 @@ describe "TokenizedBuffer", ->
           'abc\uD835\uDF97def'
           //\uD835\uDF97xyz
         """
-        tokenizedBuffer = new TokenizedBuffer({buffer})
+        tokenizedBuffer = new TokenizedBuffer({
+          buffer, config: atom.config, grammarRegistry: atom.grammars, packageManager: atom.packages, assert: atom.assert
+        })
         fullyTokenize(tokenizedBuffer)
 
     afterEach ->
@@ -471,7 +495,7 @@ describe "TokenizedBuffer", ->
       tokenizedHandler = jasmine.createSpy("tokenized handler")
 
       waitsForPromise ->
-        atom.project.open('sample.js').then (o) -> editor = o
+        atom.workspace.open('sample.js').then (o) -> editor = o
 
       runs ->
         tokenizedBuffer = editor.displayBuffer.tokenizedBuffer
@@ -484,7 +508,7 @@ describe "TokenizedBuffer", ->
       tokenizedHandler = jasmine.createSpy("tokenized handler")
 
       waitsForPromise ->
-        atom.project.open('sample.js').then (o) -> editor = o
+        atom.workspace.open('sample.js').then (o) -> editor = o
 
       runs ->
         tokenizedBuffer = editor.displayBuffer.tokenizedBuffer
@@ -502,7 +526,7 @@ describe "TokenizedBuffer", ->
       tokenizedHandler = jasmine.createSpy("tokenized handler")
 
       waitsForPromise ->
-        atom.project.open('coffee.coffee').then (o) -> editor = o
+        atom.workspace.open('coffee.coffee').then (o) -> editor = o
 
       runs ->
         tokenizedBuffer = editor.displayBuffer.tokenizedBuffer
@@ -528,7 +552,9 @@ describe "TokenizedBuffer", ->
       runs ->
         buffer = atom.project.bufferForPathSync()
         buffer.setText "<div class='name'><%= User.find(2).full_name %></div>"
-        tokenizedBuffer = new TokenizedBuffer({buffer})
+        tokenizedBuffer = new TokenizedBuffer({
+          buffer, config: atom.config, grammarRegistry: atom.grammars, packageManager: atom.packages, assert: atom.assert
+        })
         tokenizedBuffer.setGrammar(atom.grammars.selectGrammar('test.erb'))
         fullyTokenize(tokenizedBuffer)
 
@@ -541,7 +567,7 @@ describe "TokenizedBuffer", ->
       runs ->
         fullyTokenize(tokenizedBuffer)
         {tokens} = tokenizedBuffer.tokenizedLineForRow(0)
-        expect(tokens[0]).toEqual value: '<', scopes: ["text.html.ruby","meta.tag.block.any.html","punctuation.definition.tag.begin.html"]
+        expect(tokens[0]).toEqual value: '<', scopes: ["text.html.ruby", "meta.tag.block.any.html", "punctuation.definition.tag.begin.html"]
 
   describe ".tokenForPosition(position)", ->
     afterEach ->
@@ -550,16 +576,21 @@ describe "TokenizedBuffer", ->
 
     it "returns the correct token (regression)", ->
       buffer = atom.project.bufferForPathSync('sample.js')
-      tokenizedBuffer = new TokenizedBuffer({buffer})
+      tokenizedBuffer = new TokenizedBuffer({
+        buffer, config: atom.config, grammarRegistry: atom.grammars, packageManager: atom.packages, assert: atom.assert
+      })
       fullyTokenize(tokenizedBuffer)
-      expect(tokenizedBuffer.tokenForPosition([1,0]).scopes).toEqual ["source.js"]
-      expect(tokenizedBuffer.tokenForPosition([1,1]).scopes).toEqual ["source.js"]
-      expect(tokenizedBuffer.tokenForPosition([1,2]).scopes).toEqual ["source.js", "storage.modifier.js"]
+      expect(tokenizedBuffer.tokenForPosition([1, 0]).scopes).toEqual ["source.js"]
+      expect(tokenizedBuffer.tokenForPosition([1, 1]).scopes).toEqual ["source.js"]
+      expect(tokenizedBuffer.tokenForPosition([1, 2]).scopes).toEqual ["source.js", "storage.type.var.js"]
 
   describe ".bufferRangeForScopeAtPosition(selector, position)", ->
     beforeEach ->
       buffer = atom.project.bufferForPathSync('sample.js')
-      tokenizedBuffer = new TokenizedBuffer({buffer})
+      tokenizedBuffer = new TokenizedBuffer({
+        buffer, config: atom.config, grammarRegistry: atom.grammars,
+        packageManager: atom.packages, assert: atom.assert
+      })
       fullyTokenize(tokenizedBuffer)
 
     describe "when the selector does not match the token at the position", ->
@@ -568,39 +599,46 @@ describe "TokenizedBuffer", ->
 
     describe "when the selector matches a single token at the position", ->
       it "returns the range covered by the token", ->
-        expect(tokenizedBuffer.bufferRangeForScopeAtPosition('.storage.modifier.js', [0, 1])).toEqual [[0, 0], [0, 3]]
+        expect(tokenizedBuffer.bufferRangeForScopeAtPosition('.storage.type.var.js', [0, 1])).toEqual [[0, 0], [0, 3]]
+        expect(tokenizedBuffer.bufferRangeForScopeAtPosition('.storage.type.var.js', [0, 3])).toEqual [[0, 0], [0, 3]]
 
     describe "when the selector matches a run of multiple tokens at the position", ->
       it "returns the range covered by all contigous tokens (within a single line)", ->
-        expect(tokenizedBuffer.bufferRangeForScopeAtPosition('.meta.function', [1, 18])).toEqual [[1, 6], [1, 28]]
+        expect(tokenizedBuffer.bufferRangeForScopeAtPosition('.function', [1, 18])).toEqual [[1, 6], [1, 28]]
 
   describe "when the editor.tabLength config value changes", ->
     it "updates the tab length of the tokenized lines", ->
       buffer = atom.project.bufferForPathSync('sample.js')
       buffer.setText('\ttest')
-      tokenizedBuffer = new TokenizedBuffer({buffer})
+      tokenizedBuffer = new TokenizedBuffer({
+        buffer, config: atom.config, grammarRegistry: atom.grammars, packageManager: atom.packages, assert: atom.assert
+      })
       fullyTokenize(tokenizedBuffer)
-      expect(tokenizedBuffer.tokenForPosition([0,0]).value).toBe '  '
+      expect(tokenizedBuffer.tokenForPosition([0, 0]).value).toBe '  '
       atom.config.set('editor.tabLength', 6)
-      expect(tokenizedBuffer.tokenForPosition([0,0]).value).toBe '      '
+      expect(tokenizedBuffer.tokenForPosition([0, 0]).value).toBe '      '
 
     it "does not allow the tab length to be less than 1", ->
       buffer = atom.project.bufferForPathSync('sample.js')
       buffer.setText('\ttest')
-      tokenizedBuffer = new TokenizedBuffer({buffer})
+      tokenizedBuffer = new TokenizedBuffer({
+        buffer, config: atom.config, grammarRegistry: atom.grammars, packageManager: atom.packages, assert: atom.assert
+      })
       fullyTokenize(tokenizedBuffer)
-      expect(tokenizedBuffer.tokenForPosition([0,0]).value).toBe '  '
+      expect(tokenizedBuffer.tokenForPosition([0, 0]).value).toBe '  '
       atom.config.set('editor.tabLength', 1)
-      expect(tokenizedBuffer.tokenForPosition([0,0]).value).toBe ' '
+      expect(tokenizedBuffer.tokenForPosition([0, 0]).value).toBe ' '
       atom.config.set('editor.tabLength', 0)
-      expect(tokenizedBuffer.tokenForPosition([0,0]).value).toBe ' '
+      expect(tokenizedBuffer.tokenForPosition([0, 0]).value).toBe ' '
 
   describe "when the invisibles value changes", ->
     beforeEach ->
 
     it "updates the tokens with the appropriate invisible characters", ->
       buffer = new TextBuffer(text: "  \t a line with tabs\tand \tspaces \t ")
-      tokenizedBuffer = new TokenizedBuffer({buffer})
+      tokenizedBuffer = new TokenizedBuffer({
+        buffer, config: atom.config, grammarRegistry: atom.grammars, packageManager: atom.packages, assert: atom.assert
+      })
       fullyTokenize(tokenizedBuffer)
 
       atom.config.set("editor.showInvisibles", true)
@@ -613,7 +651,9 @@ describe "TokenizedBuffer", ->
 
     it "assigns endOfLineInvisibles to tokenized lines", ->
       buffer = new TextBuffer(text: "a line that ends in a carriage-return-line-feed \r\na line that ends in just a line-feed\na line with no ending")
-      tokenizedBuffer = new TokenizedBuffer({buffer})
+      tokenizedBuffer = new TokenizedBuffer({
+        buffer, config: atom.config, grammarRegistry: atom.grammars, packageManager: atom.packages, assert: atom.assert
+      })
 
       atom.config.set('editor.showInvisibles', true)
       atom.config.set("editor.invisibles", cr: 'R', eol: 'N')
@@ -634,7 +674,9 @@ describe "TokenizedBuffer", ->
   describe "leading and trailing whitespace", ->
     beforeEach ->
       buffer = atom.project.bufferForPathSync('sample.js')
-      tokenizedBuffer = new TokenizedBuffer({buffer})
+      tokenizedBuffer = new TokenizedBuffer({
+        buffer, config: atom.config, grammarRegistry: atom.grammars, packageManager: atom.packages, assert: atom.assert
+      })
       fullyTokenize(tokenizedBuffer)
 
     it "assigns ::firstNonWhitespaceIndex on tokens that have leading whitespace", ->
@@ -692,7 +734,9 @@ describe "TokenizedBuffer", ->
   describe ".indentLevel on tokenized lines", ->
     beforeEach ->
       buffer = atom.project.bufferForPathSync('sample.js')
-      tokenizedBuffer = new TokenizedBuffer({buffer})
+      tokenizedBuffer = new TokenizedBuffer({
+        buffer, config: atom.config, grammarRegistry: atom.grammars, packageManager: atom.packages, assert: atom.assert
+      })
       fullyTokenize(tokenizedBuffer)
 
     describe "when the line is non-empty", ->
@@ -787,7 +831,9 @@ describe "TokenizedBuffer", ->
       buffer = atom.project.bufferForPathSync('sample.js')
       buffer.insert [10, 0], "  // multi-line\n  // comment\n  // block\n"
       buffer.insert [0, 0], "// multi-line\n// comment\n// block\n"
-      tokenizedBuffer = new TokenizedBuffer({buffer})
+      tokenizedBuffer = new TokenizedBuffer({
+        buffer, config: atom.config, grammarRegistry: atom.grammars, packageManager: atom.packages, assert: atom.assert
+      })
       fullyTokenize(tokenizedBuffer)
       tokenizedBuffer.onDidChange (change) ->
         delete change.bufferChange
@@ -864,7 +910,9 @@ describe "TokenizedBuffer", ->
       buffer = atom.project.bufferForPathSync('sample.will-use-the-null-grammar')
       buffer.setText('a\nb\nc')
 
-      tokenizedBuffer = new TokenizedBuffer({buffer})
+      tokenizedBuffer = new TokenizedBuffer({
+        buffer, config: atom.config, grammarRegistry: atom.grammars, packageManager: atom.packages, assert: atom.assert
+      })
       tokenizeCallback = jasmine.createSpy('onDidTokenize')
       tokenizedBuffer.onDidTokenize(tokenizeCallback)
 
@@ -879,3 +927,57 @@ describe "TokenizedBuffer", ->
       expect(tokenizedBuffer.tokenizedLineForRow(1).tokens[0].value).toBe 'b'
       expect(tokenizedBuffer.tokenizedLineForRow(2).tokens.length).toBe 1
       expect(tokenizedBuffer.tokenizedLineForRow(2).tokens[0].value).toBe 'c'
+
+  describe 'when a file is opened', ->
+    [registration, editor, called] = []
+    beforeEach ->
+      runs ->
+        called = false
+        registration = atom.packages.onDidTriggerActivationHook('language-javascript:grammar-used', -> called = true)
+
+      waitsForPromise ->
+        atom.workspace.open('sample.js', autoIndent: false).then (o) ->
+          editor = o
+
+      waitsForPromise ->
+        atom.packages.activatePackage('language-javascript')
+
+    afterEach: ->
+      registration?.dispose?()
+      atom.packages.deactivatePackages()
+      atom.packages.unloadPackages()
+
+    it 'triggers the grammar-used hook', ->
+      waitsFor ->
+        called is true
+
+      runs ->
+        expect(called).toBe true
+
+    describe 'when changing the grammar of an open file', ->
+      [coffeeRegistration, coffeeCalled] = []
+
+      beforeEach ->
+        coffeeCalled = false
+        coffeeRegistration = atom.packages.onDidTriggerActivationHook('language-coffee-script:grammar-used', -> coffeeCalled = true)
+
+        waitsForPromise ->
+          atom.packages.activatePackage('language-coffee-script')
+
+      afterEach ->
+        coffeeRegistration?.dispose()
+
+      it 'triggers the grammar-used hook', ->
+        waitsFor ->
+          called is true
+
+        runs ->
+          expect(called).toBe true
+          expect(coffeeCalled).toBe false
+          editor.setGrammar(atom.grammars.selectGrammar('.coffee'))
+
+        waitsFor ->
+          coffeeCalled is true
+
+        runs ->
+          expect(coffeeCalled).toBe true

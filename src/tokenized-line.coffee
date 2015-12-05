@@ -102,10 +102,11 @@ class TokenizedLine
           substringEnd += 1
         else
           if (screenColumn + 1) % @tabLength is 0
-            @specialTokens[tokenIndex] = SoftTab
             suffix = @tags[tokenIndex] - @tabLength
-            @tags.splice(tokenIndex, 1, @tabLength)
-            @tags.splice(tokenIndex + 1, 0, suffix) if suffix > 0
+            if suffix >= 0
+              @specialTokens[tokenIndex] = SoftTab
+              @tags.splice(tokenIndex, 1, @tabLength)
+              @tags.splice(tokenIndex + 1, 0, suffix) if suffix > 0
 
           if @invisibles?.space
             if substringEnd > substringStart
@@ -183,7 +184,7 @@ class TokenizedLine
       @lineIsWhitespaceOnly = true
       @firstTrailingWhitespaceIndex = 0
 
-  getTokenIterator: -> @tokenIterator.reset(this)
+  getTokenIterator: -> @tokenIterator.reset(this, arguments...)
 
   Object.defineProperty @prototype, 'tokens', get: ->
     iterator = @getTokenIterator()
@@ -220,17 +221,20 @@ class TokenizedLine
   copy: ->
     copy = new TokenizedLine
     copy.tokenIterator = @tokenIterator
-    copy.indentLevel = @indentLevel
     copy.openScopes = @openScopes
     copy.text = @text
     copy.tags = @tags
     copy.specialTokens = @specialTokens
+    copy.startBufferColumn = @startBufferColumn
+    copy.bufferDelta = @bufferDelta
+    copy.ruleStack = @ruleStack
+    copy.lineEnding = @lineEnding
+    copy.invisibles = @invisibles
+    copy.endOfLineInvisibles = @endOfLineInvisibles
+    copy.indentLevel = @indentLevel
+    copy.tabLength = @tabLength
     copy.firstNonWhitespaceIndex = @firstNonWhitespaceIndex
     copy.firstTrailingWhitespaceIndex = @firstTrailingWhitespaceIndex
-    copy.lineEnding = @lineEnding
-    copy.endOfLineInvisibles = @endOfLineInvisibles
-    copy.ruleStack = @ruleStack
-    copy.startBufferColumn = @startBufferColumn
     copy.fold = @fold
     copy
 
@@ -383,15 +387,17 @@ class TokenizedLine
             rightSpecialTokens[rightTags.length] = specialToken
           rightTags.push(tag)
 
-      # tag represents the start or end of a scop
+      # tag represents the start of a scope
       else if (tag % 2) is -1
         if screenColumn < column
           leftTags.push(tag)
           rightOpenScopes.push(tag)
         else
           rightTags.push(tag)
+
+      # tag represents the end of a scope
       else
-        if screenColumn < column
+        if screenColumn <= column
           leftTags.push(tag)
           rightOpenScopes.pop()
         else
